@@ -2,11 +2,12 @@ import { Lesson, Charge, Payment, PaymentAllocation, IncomeEntry, PaymentMethod,
 import { generateUUID } from './crypto';
 
 export interface CompleteAndPayPayload {
+  isAlreadyPaid: boolean;
   updatedLesson: Lesson;
   newCharge: Charge | null;
   targetChargeId: UUID;
-  newPayment: Payment;
-  newAllocation: PaymentAllocation;
+  newPayment: Payment | null;
+  newAllocation: PaymentAllocation | null;
   newIncomeEntry: IncomeEntry | null;
   updatedIncomeEntry: IncomeEntry | null;
 }
@@ -14,15 +15,18 @@ export interface CompleteAndPayPayload {
 /**
  * Pure domain function to build complete and pay entities.
  * Guarantees:
- * 1. Exactly 1 charge per lesson (uses existing if already created, otherwise creates 1 new).
- * 2. Exactly 1 payment with specified method.
- * 3. Exactly 1 allocation linking payment directly to targetChargeId.
- * 4. Distinct income entry per lesson using lesson_id (supports multiple lessons per day for same student).
- * 5. Deterministic, testable and free of UI/closure race conditions.
+ * 1. Strict idempotency: if lesson is already completed and fully paid, returns isAlreadyPaid: true
+ *    and produces NO new payment, NO new charge, NO new allocation ("nic do zrobienia").
+ * 2. Exactly 1 charge per lesson (uses existing if already created, otherwise creates 1 new).
+ * 3. Exactly 1 payment with specified method.
+ * 4. Exactly 1 allocation linking payment directly to targetChargeId.
+ * 5. Distinct income entry per lesson using lesson_id (supports multiple lessons per day for same student).
+ * 6. Deterministic, testable and free of UI/closure race conditions.
  */
 export function buildCompleteAndPayPayload(
   lesson: Lesson,
   existingCharges: Charge[],
+  existingAllocations: PaymentAllocation[],
   existingIncomeEntries: IncomeEntry[],
   todayStr: string,
   nextIncomeNumber: string,
@@ -30,8 +34,30 @@ export function buildCompleteAndPayPayload(
   nowIso: string = new Date().toISOString()
 ): CompleteAndPayPayload {
   const lessonDate = lesson.start_at.slice(0, 10);
+  const existingCharge = existingCharges.find(c => c.lesson_id === lesson.id && c.amount > 0);
 
-  // 1. Updated Lesson
+  // 1. Check if already fully paid (idempotency guarantee)
+  if (existingCharge) {
+    const totalAllocated = existingAllocations
+      .filter(a => a.charge_id === existingCharge.id)
+      .reduce((sum, a) => sum + a.amount, 0);
+
+    if (totalAllocated >= existingCharge.amount && lesson.status === 'completed') {
+      // Należność jest już w pełni opłacona – nic do zrobienia!
+      return {
+        isAlreadyPaid: true,
+        updatedLesson: lesson,
+        newCharge: null,
+        targetChargeId: existingCharge.id,
+        newPayment: null,
+        newAllocation: null,
+        newIncomeEntry: null,
+        updatedIncomeEntry: null
+      };
+    }
+  }
+
+  // 2. Updated Lesson
   const updatedLesson: Lesson = {
     ...lesson,
     status: 'completed',
@@ -39,8 +65,7 @@ export function buildCompleteAndPayPayload(
     updated_at: nowIso
   };
 
-  // 2. Charge: use existing or create new
-  const existingCharge = existingCharges.find(c => c.lesson_id === lesson.id && c.amount > 0);
+  // 3. Charge: use existing or create new
   let newCharge: Charge | null = null;
   let targetChargeId: UUID;
 
@@ -62,7 +87,7 @@ export function buildCompleteAndPayPayload(
     targetChargeId = newCharge.id;
   }
 
-  // 3. Payment
+  // 4. Payment
   const newPayment: Payment = {
     id: generateUUID(),
     student_id: lesson.student_id,
@@ -76,7 +101,7 @@ export function buildCompleteAndPayPayload(
     updated_at: nowIso
   };
 
-  // 4. Payment Allocation strictly linked to target charge
+  // 5. Payment Allocation strictly linked to target charge
   const newAllocation: PaymentAllocation = {
     id: generateUUID(),
     payment_id: newPayment.id,
@@ -87,7 +112,7 @@ export function buildCompleteAndPayPayload(
     updated_at: nowIso
   };
 
-  // 5. Income Entry: find by lesson_id first to support multiple lessons per day
+  // 6. Income Entry: find by lesson_id first to support multiple lessons per day
   const existingIncome = existingIncomeEntries.find(
     e => (e.lesson_id && e.lesson_id === lesson.id) ||
          (!e.lesson_id && e.service_date === lessonDate && e.student_id === lesson.student_id)
@@ -128,6 +153,7 @@ export function buildCompleteAndPayPayload(
   }
 
   return {
+    isAlreadyPaid: false,
     updatedLesson,
     newCharge,
     targetChargeId,

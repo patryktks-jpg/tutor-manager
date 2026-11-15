@@ -17,12 +17,15 @@ export const ReportsView: React.FC = () => {
     legalParams,
     closePeriod,
     reopenPeriodCorrection,
+    exportReportToDrive,
     offlineQueueCount
   } = useApp();
 
   const [selectedPeriod, setSelectedPeriod] = useState<Period | null>(periods[0] || null);
   const [showCorrectionModal, setShowCorrectionModal] = useState(false);
   const [correctionReason, setCorrectionReason] = useState('');
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportMsg, setExportMsg] = useState<{ text: string; pdfUrl?: string; folderUrl?: string } | null>(null);
 
   // Active or latest snapshot for period
   const activeSnapshot = selectedPeriod
@@ -255,24 +258,92 @@ export const ReportsView: React.FC = () => {
             </div>
           )}
 
-          {/* Actions: Close period or Correction */}
-          <div style={{ marginTop: 16, display: 'flex', gap: 10 }}>
-            {selectedPeriod.status === 'open' ? (
+          {/* Actions: Close period, Correction, and Export to Google Drive */}
+          <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <div style={{ display: 'flex', gap: 10 }}>
+              {selectedPeriod.status === 'open' ? (
+                <button
+                  onClick={() => handleClosePeriod(selectedPeriod.id)}
+                  className="ios-btn ios-btn-primary"
+                  style={{ flex: 1 }}
+                >
+                  <IconCheck size={16} /> Zamknij okres (snapshot)
+                </button>
+              ) : (
+                <button
+                  onClick={() => setShowCorrectionModal(true)}
+                  className="ios-btn ios-btn-secondary"
+                  style={{ flex: 1 }}
+                >
+                  Zgłoś korektę (nowa wersja)
+                </button>
+              )}
+
               <button
-                onClick={() => handleClosePeriod(selectedPeriod.id)}
-                className="ios-btn ios-btn-primary"
-                style={{ flex: 1 }}
-              >
-                <IconCheck size={16} /> Zamknij okres (utwórz snapshot)
-              </button>
-            ) : (
-              <button
-                onClick={() => setShowCorrectionModal(true)}
+                disabled={isExporting}
+                onClick={async () => {
+                  setIsExporting(true);
+                  setExportMsg(null);
+                  try {
+                    const res = await exportReportToDrive(selectedPeriod.id, reportData);
+                    if (res.success && res.files) {
+                      setExportMsg({
+                        text: 'Wygenerowano raport PDF i XLSX na Twoim Dysku Google!',
+                        pdfUrl: res.files.pdf_url,
+                        folderUrl: res.files.folder_url
+                      });
+                    } else {
+                      setExportMsg({ text: res.message });
+                    }
+                  } catch (e: any) {
+                    setExportMsg({ text: `Błąd eksportu: ${e.message}` });
+                  } finally {
+                    setIsExporting(false);
+                  }
+                }}
                 className="ios-btn ios-btn-secondary"
                 style={{ flex: 1 }}
               >
-                Zgłoś korektę po zamknięciu (nowa wersja)
+                {isExporting ? 'Generowanie...' : 'Eksportuj PDF i XLSX na Dysk'}
               </button>
+            </div>
+
+            {exportMsg && (
+              <div
+                style={{
+                  padding: 10,
+                  borderRadius: 10,
+                  backgroundColor: exportMsg.pdfUrl ? 'rgba(52,199,89,0.15)' : 'rgba(255,59,48,0.15)',
+                  fontSize: 12,
+                  marginTop: 4
+                }}
+              >
+                <div style={{ fontWeight: 600, marginBottom: exportMsg.pdfUrl ? 6 : 0 }}>
+                  {exportMsg.text}
+                </div>
+                {exportMsg.pdfUrl && (
+                  <div style={{ display: 'flex', gap: 12 }}>
+                    <a
+                      href={exportMsg.pdfUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ color: 'var(--ios-blue)', fontWeight: 700, textDecoration: 'underline' }}
+                    >
+                      Otwórz plik PDF
+                    </a>
+                    {exportMsg.folderUrl && (
+                      <a
+                        href={exportMsg.folderUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: 'var(--ios-blue)', fontWeight: 700, textDecoration: 'underline' }}
+                      >
+                        Otwórz folder na Dysku
+                      </a>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>

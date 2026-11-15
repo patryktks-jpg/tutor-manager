@@ -167,10 +167,11 @@ export async function syncWithGas(
         }
       }
 
-      // Aktualizuj last_sync_at bazując na czasie serwera lub maksymalnym updated_at pobranych danych (PUNKT 2 FIX)
+      // Aktualizuj last_sync_at bazując na świeżych ustawieniach z IndexedDB, aby nie nadpisać współbieżnych zmian (FIX)
       const syncTimestamp = pullJson.server_time || (maxUpdatedAt > (settings.last_sync_at || '') ? maxUpdatedAt : new Date().toISOString());
+      const freshSettings = (await IDBManager.get<Settings>(db, 'settings', settings.id)) || settings;
       await IDBManager.put('settings', {
-        ...settings,
+        ...freshSettings,
         last_sync_at: syncTimestamp
       });
     } else {
@@ -206,4 +207,72 @@ export async function syncWithGas(
     message: msg,
     rejectedDetails
   };
+}
+
+/**
+ * Wywołuje backend Google Apps Script, aby wygenerować pliki raportu (PDF i XLSX) na Dysku Google
+ */
+export async function exportReportViaGas(
+  settings: Settings,
+  periodId: string,
+  reportData: any
+): Promise<{ success: boolean; files?: { pdf_url: string; xlsx_url?: string; folder_url?: string }; message: string }> {
+  const url = settings.gas_web_app_url;
+  const token = settings.gas_secret_token;
+  if (!url) {
+    return { success: false, message: 'Brak skonfigurowanego adresu Web App Arkusza Google' };
+  }
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'export_report',
+        token,
+        period_id: periodId,
+        data: reportData
+      })
+    });
+    const json = await res.json();
+    if (json.status === 'ok') {
+      return { success: true, files: json.files, message: 'Wygenerowano raport PDF i XLSX na Dysku Google!' };
+    }
+    return { success: false, message: json.message || 'Błąd generowania raportu na Dysku Google' };
+  } catch (err: any) {
+    return { success: false, message: err.message };
+  }
+}
+
+/**
+ * Zgłasza lekcję do Kalendarza Google z powiadomieniem 30 min przed
+ */
+export async function syncLessonToCalendarViaGas(
+  settings: Settings,
+  lesson: any,
+  studentName?: string
+): Promise<{ success: boolean; eventId?: string; message: string }> {
+  const url = settings.gas_web_app_url;
+  const token = settings.gas_secret_token;
+  if (!url) return { success: false, message: 'Brak URL' };
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'calendar_sync',
+        token,
+        lesson,
+        student_name: studentName
+      })
+    });
+    const json = await res.json();
+    if (json.status === 'ok') {
+      return { success: true, eventId: json.calendar_event_id, message: 'Dodano do Kalendarza Google' };
+    }
+    return { success: false, message: json.message || 'Błąd kalendarza' };
+  } catch (err: any) {
+    return { success: false, message: err.message };
+  }
 }

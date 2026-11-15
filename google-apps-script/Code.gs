@@ -372,10 +372,18 @@ function generateReportFiles(ss, periodId, reportData) {
   var folders = DriveApp.getFoldersByName(folderName);
   var targetFolder = folders.hasNext() ? folders.next() : DriveApp.createFolder(folderName);
 
-  var periodLabel = reportData ? reportData.periodLabel : periodId;
+  // Bezpieczna obsługa pustego reportData (PUNKT 4 FIX)
+  reportData = reportData || {};
+  var periodLabel = reportData.periodLabel || periodId || 'Miesiac';
   var fileName = 'Raport_' + periodLabel + '_' + Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyyMMdd_HHmm');
 
-  // Stwórz czysty, wyizolowany skoroszyt wyłącznie dla raportu
+  var accruedRev = Number(reportData.accruedRevenueGrosze) || 0;
+  var receivedRev = Number(reportData.receivedRevenueGrosze) || 0;
+  var hours = reportData.hoursCompleted || 0;
+  var lessons = reportData.lessonsCompletedCount || 0;
+  var unpaid = Number(reportData.unpaidGrosze) || 0;
+
+  // Stwórz czysty, wyizolowany skoroszyt wyłącznie dla raportu (RODO)
   var isolatedSs = SpreadsheetApp.create(fileName);
   var repSheet = isolatedSs.getActiveSheet();
   repSheet.setName('Raport');
@@ -385,11 +393,11 @@ function generateReportFiles(ss, periodId, reportData) {
   repSheet.appendRow(['Data wygenerowania:', Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyy-MM-dd HH:mm')]);
   repSheet.appendRow([]);
   repSheet.appendRow(['Wskaźnik', 'Wartość']);
-  repSheet.appendRow(['Przychód należny (limit działalności):', (reportData.accruedRevenueGrosze / 100).toFixed(2) + ' zł']);
-  repSheet.appendRow(['Przychód faktycznie otrzymany (PIT):', (reportData.receivedRevenueGrosze / 100).toFixed(2) + ' zł']);
-  repSheet.appendRow(['Godziny zrealizowane:', reportData.hoursCompleted + ' h']);
-  repSheet.appendRow(['Liczba zrealizowanych lekcji:', reportData.lessonsCompletedCount]);
-  repSheet.appendRow(['Nieopłacone należności uczniów:', (reportData.unpaidGrosze / 100).toFixed(2) + ' zł']);
+  repSheet.appendRow(['Przychód należny (limit działalności):', (accruedRev / 100).toFixed(2) + ' zł']);
+  repSheet.appendRow(['Przychód faktycznie otrzymany (PIT):', (receivedRev / 100).toFixed(2) + ' zł']);
+  repSheet.appendRow(['Godziny zrealizowane:', hours + ' h']);
+  repSheet.appendRow(['Liczba zrealizowanych lekcji:', lessons]);
+  repSheet.appendRow(['Nieopłacone należności uczniów:', (unpaid / 100).toFixed(2) + ' zł']);
 
   SpreadsheetApp.flush();
 
@@ -398,11 +406,29 @@ function generateReportFiles(ss, periodId, reportData) {
   targetFolder.addFile(isolatedFile);
   DriveApp.getRootFolder().removeFile(isolatedFile);
 
+  // 1. Prawdziwy plik PDF
   var pdfBlob = isolatedFile.getAs('application/pdf').setName(fileName + '.pdf');
   var pdfFile = targetFolder.createFile(pdfBlob);
 
+  // 2. Prawdziwy plik XLSX przez eksport Google Docs (PUNKT 4 FIX)
+  var xlsxFile = null;
+  try {
+    var exportUrl = 'https://docs.google.com/spreadsheets/d/' + isolatedSs.getId() + '/export?format=xlsx';
+    var fetchRes = UrlFetchApp.fetch(exportUrl, {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true
+    });
+    if (fetchRes.getResponseCode() === 200) {
+      var xlsxBlob = fetchRes.getBlob().setName(fileName + '.xlsx');
+      xlsxFile = targetFolder.createFile(xlsxBlob);
+    }
+  } catch (e) {
+    // UrlFetch fallback
+  }
+
   return {
     pdf_url: pdfFile.getUrl(),
+    xlsx_url: xlsxFile ? xlsxFile.getUrl() : isolatedFile.getUrl(),
     sheet_url: isolatedFile.getUrl(),
     folder_url: targetFolder.getUrl()
   };

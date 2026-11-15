@@ -53,7 +53,7 @@ function initializeAllSheets() {
     income_entries: [
       'id', 'number', 'service_date', 'accrual_date', 'received_date', 'student_id',
       'service_type', 'amount_due', 'amount_received', 'method', 'status',
-      'period_id', 'lesson_id', 'version', 'created_at', 'updated_at'
+      'period_id', 'version', 'created_at', 'updated_at', 'lesson_id'
     ],
     legal_params: [
       'id', 'year', 'min_wage', 'factor_pct', 'frequency', 'valid_from',
@@ -92,18 +92,38 @@ function initializeAllSheets() {
       sheet = ss.insertSheet(name);
     }
 
-    var headers = schemas[name];
-    var headerRange = sheet.getRange(1, 1, 1, headers.length);
-    headerRange.setValues([headers]);
+    var expectedHeaders = schemas[name];
+    var lastCol = sheet.getLastColumn();
+    var lastRow = sheet.getLastRow();
 
-    headerRange.setBackground('#007AFF');
-    headerRange.setFontColor('#FFFFFF');
-    headerRange.setFontWeight('bold');
-    sheet.setFrozenRows(1);
+    if (lastCol === 0 || lastRow === 0) {
+      // Pusty arkusz: wstaw nagłówki od zera
+      var headerRange = sheet.getRange(1, 1, 1, expectedHeaders.length);
+      headerRange.setValues([expectedHeaders]);
+      headerRange.setBackground('#007AFF');
+      headerRange.setFontColor('#FFFFFF');
+      headerRange.setFontWeight('bold');
+      sheet.setFrozenRows(1);
+    } else {
+      // Arkusz z danymi (PUNKT 2 FIX): dopisuje brakujące kolumny na końcu, NIE przesuwając istniejących danych!
+      var existingHeaders = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+      for (var h = 0; h < expectedHeaders.length; h++) {
+        var colName = expectedHeaders[h];
+        if (existingHeaders.indexOf(colName) === -1) {
+          lastCol++;
+          var newHeaderCell = sheet.getRange(1, lastCol);
+          newHeaderCell.setValue(colName);
+          newHeaderCell.setBackground('#007AFF');
+          newHeaderCell.setFontColor('#FFFFFF');
+          newHeaderCell.setFontWeight('bold');
+          existingHeaders.push(colName);
+        }
+      }
+    }
 
-    // PUNKT 2: Ustawienie formatowania całego arkusza jako TEKST ZWYKŁY (@),
-    // aby zapobiec samoczynnemu parsowaniu dat i przesunięciom stref czasowych!
-    sheet.getRange(2, 1, sheet.getMaxRows() - 1, headers.length).setNumberFormat('@');
+    // Ustawienie formatowania całego arkusza jako TEKST ZWYKŁY (@)
+    var numRows = Math.max(1, sheet.getMaxRows() - 1);
+    sheet.getRange(2, 1, numRows, sheet.getLastColumn()).setNumberFormat('@');
   }
 
   var defaultSheet = ss.getSheetByName('Arkusz1') || ss.getSheetByName('Sheet1');

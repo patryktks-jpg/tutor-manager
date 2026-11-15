@@ -224,8 +224,9 @@ describe('Domain Full Coverage Suite (≥ 90%)', () => {
     const dateToday = '2026-11-16';
 
     // 1. Initial complete and pay from planned state
-    const payload1 = buildCompleteAndPayPayload(lesson, [], [], dateToday, '2026/001', 'blik');
+    const payload1 = buildCompleteAndPayPayload(lesson, [], [], [], dateToday, '2026/001', 'blik');
 
+    expect(payload1.isAlreadyPaid).toBe(false);
     expect(payload1.updatedLesson.status).toBe('completed');
     expect(payload1.updatedLesson.version).toBe(2);
 
@@ -234,13 +235,15 @@ describe('Domain Full Coverage Suite (≥ 90%)', () => {
     expect(payload1.newCharge!.accrual_date).toBe('2026-11-16');
     expect(payload1.newCharge!.lesson_id).toBe(lesson.id);
 
-    expect(payload1.newPayment.amount).toBe(7000);
-    expect(payload1.newPayment.method).toBe('blik');
-    expect(payload1.newPayment.student_id).toBe('s-atomic');
+    expect(payload1.newPayment).not.toBeNull();
+    expect(payload1.newPayment!.amount).toBe(7000);
+    expect(payload1.newPayment!.method).toBe('blik');
+    expect(payload1.newPayment!.student_id).toBe('s-atomic');
 
-    expect(payload1.newAllocation.payment_id).toBe(payload1.newPayment.id);
-    expect(payload1.newAllocation.charge_id).toBe(payload1.newCharge!.id);
-    expect(payload1.newAllocation.amount).toBe(7000);
+    expect(payload1.newAllocation).not.toBeNull();
+    expect(payload1.newAllocation!.payment_id).toBe(payload1.newPayment!.id);
+    expect(payload1.newAllocation!.charge_id).toBe(payload1.newCharge!.id);
+    expect(payload1.newAllocation!.amount).toBe(7000);
 
     expect(payload1.newIncomeEntry).not.toBeNull();
     expect(payload1.newIncomeEntry!.status).toBe('paid');
@@ -249,23 +252,27 @@ describe('Domain Full Coverage Suite (≥ 90%)', () => {
     expect(payload1.newIncomeEntry!.lesson_id).toBe(lesson.id);
     expect(payload1.newIncomeEntry!.number).toBe('2026/001');
 
-    // 2. Idempotency test: calling on already completed/charged lesson
+    // 2. Strict idempotency test: calling on already completed AND paid lesson
     const existingCharges = [payload1.newCharge!];
+    const existingAllocations = [payload1.newAllocation!];
     const existingIncomes = [payload1.newIncomeEntry!];
 
     const payload2 = buildCompleteAndPayPayload(
       payload1.updatedLesson,
       existingCharges,
+      existingAllocations,
       existingIncomes,
       dateToday,
       '2026/002',
       'blik'
     );
 
-    // Should NOT create duplicate charge
+    // Strict idempotency: isAlreadyPaid === true, and produces NO new payment, NO new charge, NO new allocation!
+    expect(payload2.isAlreadyPaid).toBe(true);
     expect(payload2.newCharge).toBeNull();
-    expect(payload2.targetChargeId).toBe(payload1.newCharge!.id);
-    expect(payload2.newAllocation.charge_id).toBe(payload1.newCharge!.id);
+    expect(payload2.newPayment).toBeNull();
+    expect(payload2.newAllocation).toBeNull();
+    expect(payload2.newIncomeEntry).toBeNull();
 
     // 3. Two lessons for the SAME student on the SAME day
     const lesson2: Lesson = {
@@ -286,6 +293,7 @@ describe('Domain Full Coverage Suite (≥ 90%)', () => {
     const payloadSameDay = buildCompleteAndPayPayload(
       lesson2,
       existingCharges,
+      existingAllocations,
       existingIncomes,
       dateToday,
       '2026/002',
@@ -293,6 +301,7 @@ describe('Domain Full Coverage Suite (≥ 90%)', () => {
     );
 
     // Distinct charge, distinct allocation, distinct income entry with lesson_id
+    expect(payloadSameDay.isAlreadyPaid).toBe(false);
     expect(payloadSameDay.newCharge).not.toBeNull();
     expect(payloadSameDay.newCharge!.amount).toBe(8000);
     expect(payloadSameDay.newCharge!.lesson_id).toBe(lesson2.id);
@@ -301,5 +310,55 @@ describe('Domain Full Coverage Suite (≥ 90%)', () => {
     expect(payloadSameDay.newIncomeEntry!.lesson_id).toBe(lesson2.id);
     expect(payloadSameDay.newIncomeEntry!.amount_due).toBe(8000);
     expect(payloadSameDay.newIncomeEntry!.number).toBe('2026/002');
+
+    // 4. Test when existing income entry exists as unpaid and gets updated to paid
+    const unpaidIncome = {
+      id: generateUUID(),
+      number: '2026/003',
+      service_date: '2026-11-16',
+      accrual_date: '2026-11-16',
+      student_id: 's-atomic',
+      lesson_id: 'l-atomic-3',
+      service_type: 'Chemia',
+      amount_due: 7500,
+      amount_received: 0,
+      method: 'blik' as const,
+      status: 'unpaid' as const,
+      version: 1,
+      created_at: '2026-11-16T10:00:00',
+      updated_at: '2026-11-16T10:00:00'
+    };
+
+    const lesson3: Lesson = {
+      id: 'l-atomic-3',
+      student_id: 's-atomic',
+      start_at: '2026-11-16T20:00:00',
+      duration_min: 60,
+      status: 'completed',
+      price_snapshot: 7500,
+      subject: 'Chemia',
+      location: 'student_home',
+      notes: '',
+      version: 2,
+      created_at: '2026-11-16T10:00:00',
+      updated_at: '2026-11-16T10:00:00'
+    };
+
+    const payloadUpdate = buildCompleteAndPayPayload(
+      lesson3,
+      [],
+      [],
+      [unpaidIncome],
+      dateToday,
+      '2026/004',
+      'przelew'
+    );
+
+    expect(payloadUpdate.newIncomeEntry).toBeNull();
+    expect(payloadUpdate.updatedIncomeEntry).not.toBeNull();
+    expect(payloadUpdate.updatedIncomeEntry!.status).toBe('paid');
+    expect(payloadUpdate.updatedIncomeEntry!.amount_received).toBe(7500);
+    expect(payloadUpdate.updatedIncomeEntry!.method).toBe('przelew');
+    expect(payloadUpdate.updatedIncomeEntry!.version).toBe(2);
   });
 });

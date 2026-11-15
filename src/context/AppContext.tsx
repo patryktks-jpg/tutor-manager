@@ -23,7 +23,7 @@ import {
 import { generateUUID, hashPin } from '../domain/crypto';
 import { getWarsawDateStr } from '../domain/dateUtils';
 import { IDBManager } from '../db/idb';
-import { syncWithGas, testGasConnection, SyncResult } from '../db/sync';
+import { syncWithGas, testGasConnection, exportReportViaGas, syncLessonToCalendarViaGas, SyncResult } from '../db/sync';
 import { calculateQuarterLimitStatus, LimitStatus } from '../domain/limit';
 import { proposeFifoAllocation } from '../domain/allocation';
 import { assessCancellation, DEFAULT_CANCEL_POLICY } from '../domain/cancelPolicy';
@@ -91,6 +91,8 @@ interface AppContextValue {
   restoreBackup: (jsonStr: string) => Promise<void>;
   clearUserData: () => Promise<void>;
   loadDemoData: () => Promise<void>;
+  exportReportToDrive: (periodId: UUID, reportData: any) => Promise<{ success: boolean; files?: { pdf_url: string; xlsx_url?: string; folder_url?: string }; message: string }>;
+  syncLessonCalendar: (lesson: Lesson, studentName?: string) => Promise<{ success: boolean; message: string }>;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -315,12 +317,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const payload = buildCompleteAndPayPayload(
       lesson,
       charges,
+      paymentAllocations,
       incomeEntries,
       dateToday,
       nextIncomeNum,
       method,
       nowIso
     );
+
+    // Idempotency: jeśli lekcja była już opłacona, nic nie rób
+    if (payload.isAlreadyPaid) {
+      return;
+    }
 
     // Batch operations in a SINGLE multi-store atomic IndexedDB transaction
     const dbOperations: Array<{ store: string; action: 'put' | 'delete'; item?: any; key?: any }> = [];
@@ -350,12 +358,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // 3. Payment
-    dbOperations.push({ store: 'payments', action: 'put', item: payload.newPayment });
-    queueOp('payments', 'insert', payload.newPayment);
+    if (payload.newPayment) {
+      dbOperations.push({ store: 'payments', action: 'put', item: payload.newPayment });
+      queueOp('payments', 'insert', payload.newPayment);
+    }
 
     // 4. Payment Allocation
-    dbOperations.push({ store: 'payment_allocations', action: 'put', item: payload.newAllocation });
-    queueOp('payment_allocations', 'insert', payload.newAllocation);
+    if (payload.newAllocation) {
+      dbOperations.push({ store: 'payment_allocations', action: 'put', item: payload.newAllocation });
+      queueOp('payment_allocations', 'insert', payload.newAllocation);
+    }
 
     // 5. Income Entry
     if (payload.newIncomeEntry) {
@@ -374,15 +386,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (payload.newCharge) {
       setCharges(prev => [...prev, payload.newCharge!]);
     }
-    setPayments(prev => [...prev, payload.newPayment]);
-    setPaymentAllocations(prev => [...prev, payload.newAllocation]);
+    if (payload.newPayment) {
+      setPayments(prev => [...prev, payload.newPayment!]);
+    }
+    if (payload.newAllocation) {
+      setPaymentAllocations(prev => [...prev, payload.newAllocation!]);
+    }
     if (payload.newIncomeEntry) {
       setIncomeEntries(prev => [...prev, payload.newIncomeEntry!]);
     } else if (payload.updatedIncomeEntry) {
       setIncomeEntries(prev => prev.map(e => e.id === payload.updatedIncomeEntry!.id ? payload.updatedIncomeEntry! : e));
     }
     setOfflineQueue(prev => [...prev, ...newQueueOps]);
-  }, [lessons, charges, incomeEntries, todayStr, assertNotClosedPeriod, getNextIncomeNumber]);
+  }, [lessons, charges, paymentAllocations, incomeEntries, todayStr, assertNotClosedPeriod, getNextIncomeNumber]);
 
   /**
    * POINT 1 & 2 FIX:
@@ -934,6 +950,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setRejectedOperations([]);
   }, []);
 
+  const exportReportToDrive = useCallback(async (periodId: UUID, reportData: any) => {
+    return await exportReportViaGas(settings, periodId, reportData);
+  }, [settings]);
+
+  const syncLessonCalendar = useCallback(async (lesson: Lesson, studentName?: string) => {
+    return await syncLessonToCalendarViaGas(settings, lesson, studentName);
+  }, [settings]);
+
   const value = useMemo(() => ({
     isReady,
     isLocked,
@@ -986,7 +1010,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     exportBackup,
     restoreBackup,
     clearUserData,
-    loadDemoData
+    loadDemoData,
+    exportReportToDrive,
+    syncLessonCalendar
   }), [
     isReady,
     isLocked,
@@ -1037,7 +1063,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     exportBackup,
     restoreBackup,
     clearUserData,
-    loadDemoData
+    loadDemoData,
+    exportReportToDrive,
+    syncLessonCalendar
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

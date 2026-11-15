@@ -7,7 +7,15 @@ import { getWarsawDateStr } from '../../domain/dateUtils';
 import { IconAlertTriangle, IconCheck, IconPlus, IconX } from '../common/Icons';
 
 export const CalendarView: React.FC = () => {
-  const { lessons, students, todayStr, createLesson, updateLessonStatus, rescheduleLesson } = useApp();
+  const {
+    lessons,
+    students,
+    todayStr,
+    createLesson,
+    updateLessonStatus,
+    rescheduleLesson,
+    syncLessonCalendar
+  } = useApp();
   const [viewMode, setViewMode] = useState<'day' | 'week' | 'month'>('week');
 
   // Selected date reference
@@ -59,7 +67,7 @@ export const CalendarView: React.FC = () => {
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const student = students.find(s => s.id === newStudentId);
-    await createLesson({
+    const created = await createLesson({
       student_id: newStudentId,
       start_at: `${newDate}T${newTime}:00`,
       duration_min: Number(newDuration),
@@ -67,6 +75,10 @@ export const CalendarView: React.FC = () => {
       price_snapshot: student?.default_rate || 7000,
       status: 'planned'
     });
+    // Opcjonalnie zsynchronizuj z Kalendarzem Google jeśli skonfigurowano
+    try {
+      syncLessonCalendar(created, student ? `${student.first_name} ${student.last_name}` : undefined);
+    } catch (err) {}
     setShowAddModal(false);
   };
 
