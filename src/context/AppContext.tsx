@@ -53,6 +53,7 @@ interface AppContextValue {
   auditLogs: AuditLog[];
   settings: Settings;
   offlineQueue: OfflineOperation[];
+  rejectedOperations: OfflineOperation[];
 
   // Dynamic computed properties
   todayStr: string;
@@ -62,6 +63,7 @@ interface AppContextValue {
   offlineQueueCount: number;
 
   // Domain Operations
+  completeAndPayLesson: (lessonId: UUID, method?: PaymentMethod) => Promise<void>;
   markLessonCompleted: (lessonId: UUID) => Promise<void>;
   recordLessonPayment: (lessonId: UUID, method?: PaymentMethod) => Promise<void>;
   updateLessonStatus: (lessonId: UUID, status: Lesson['status'], note?: string) => Promise<void>;
@@ -78,6 +80,9 @@ interface AppContextValue {
   acceptLegalDeclaration: () => Promise<void>;
 
   // Sync & Data management
+  rejectedOperationsCount: number;
+  dismissRejectedOperation: (opId: UUID) => Promise<void>;
+  clearAllRejectedOperations: () => Promise<void>;
   syncStatus: { isSyncing: boolean; message: string; lastResult?: SyncResult };
   syncNow: () => Promise<SyncResult>;
   testConnection: (url: string, token: string) => Promise<{ success: boolean; message: string }>;
@@ -113,6 +118,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [settings, setSettings] = useState<Settings>({} as Settings);
   const [offlineQueue, setOfflineQueue] = useState<OfflineOperation[]>([]);
+  const [rejectedOperations, setRejectedOperations] = useState<OfflineOperation[]>([]);
 
   const [syncStatus, setSyncStatus] = useState<{ isSyncing: boolean; message: string; lastResult?: SyncResult }>({
     isSyncing: false,
@@ -155,6 +161,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAuditLogs(data.audit_logs);
     setSettings(data.settings);
     setOfflineQueue(data.offline_queue);
+    setRejectedOperations(data.rejected_operations || []);
 
     if (data.settings.pin_enabled && data.settings.pin_hash) {
       setIsLocked(true);
@@ -285,6 +292,138 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [incomeEntries]);
 
   /**
+   * ATOMIC COMPLETE AND PAY (Spec A1 single tap/swipe: "zrealizowana + zapłacona BLIK-iem"):
+   * Creates/updates Lesson, Charge, Payment, PaymentAllocation, and IncomeEntry (directly as 'paid')
+   * in ONE single atomic state transition and batch queue commit.
+   * Completely avoids React state closure race conditions, duplicate charges,
+   * duplicate income entries, and unallocated payments.
+   */
+  const completeAndPayLesson = useCallback(async (lessonId: UUID, method: PaymentMethod = 'blik') => {
+    const lesson = lessons.find(l => l.id === lessonId);
+    if (!lesson) return;
+
+    assertNotClosedPeriod(lesson.start_at);
+
+    const nowIso = new Date().toISOString();
+    const dateToday = todayStr;
+    const lessonDate = lesson.start_at.slice(0, 10);
+    const year = Number(lessonDate.slice(0, 4));
+
+    // 1. Updated Lesson
+    const updatedLesson: Lesson = {
+      ...lesson,
+      status: 'completed',
+      version: lesson.status === 'completed' ? lesson.version : lesson.version + 1,
+      updated_at: nowIso
+    };
+
+    // 2. Charge: use existing or create new
+    let chargeToUse = charges.find(c => c.lesson_id === lesson.id && c.amount > 0);
+    let newCharge: Charge | null = null;
+    if (!chargeToUse) {
+      newCharge = {
+        id: generateUUID(),
+        student_id: lesson.student_id,
+        lesson_id: lesson.id,
+        amount: lesson.price_snapshot,
+        accrual_date: lessonDate,
+        charge_type: 'lesson',
+        description: `Lekcja: ${lesson.subject}`,
+        version: 1,
+        created_at: nowIso,
+        updated_at: nowIso
+      };
+      chargeToUse = newCharge;
+    }
+
+    // 3. Payment
+    const newPayment: Payment = {
+      id: generateUUID(),
+      student_id: lesson.student_id,
+      amount: lesson.price_snapshot,
+      received_date: dateToday,
+      method,
+      description: `Płatność ${method.toUpperCase()} za lekcję z ${lessonDate}`,
+      payment_type: 'wplata',
+      version: 1,
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+
+    // 4. Payment Allocation (strictly allocated to chargeToUse.id)
+    const newAlloc: PaymentAllocation = {
+      id: generateUUID(),
+      payment_id: newPayment.id,
+      charge_id: chargeToUse.id,
+      amount: lesson.price_snapshot,
+      version: 1,
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+
+    // 5. Income Entry: create directly as 'paid' or update existing
+    const existingIncome = incomeEntries.find(e => e.service_date === lessonDate && e.student_id === lesson.student_id);
+    let newIncome: IncomeEntry | null = null;
+    let updatedIncome: IncomeEntry | null = null;
+
+    if (!existingIncome) {
+      const formattedNum = getNextIncomeNumber(year);
+      newIncome = {
+        id: generateUUID(),
+        number: formattedNum,
+        service_date: lessonDate,
+        accrual_date: lessonDate,
+        student_id: lesson.student_id,
+        service_type: lesson.subject || 'Lekcja matematyki',
+        amount_due: lesson.price_snapshot,
+        amount_received: lesson.price_snapshot,
+        received_date: dateToday,
+        method,
+        status: 'paid',
+        version: 1,
+        created_at: nowIso,
+        updated_at: nowIso
+      };
+    } else {
+      updatedIncome = {
+        ...existingIncome,
+        received_date: dateToday,
+        amount_received: lesson.price_snapshot,
+        method,
+        status: 'paid',
+        version: existingIncome.version + 1,
+        updated_at: nowIso
+      };
+    }
+
+    // Atomic persistence to IDB and offline queue
+    await commitChange('lessons', 'update', updatedLesson);
+    if (newCharge) {
+      await commitChange('charges', 'insert', newCharge);
+    }
+    await commitChange('payments', 'insert', newPayment);
+    await commitChange('payment_allocations', 'insert', newAlloc);
+    if (newIncome) {
+      await commitChange('income_entries', 'insert', newIncome);
+    } else if (updatedIncome) {
+      await commitChange('income_entries', 'update', updatedIncome);
+    }
+
+    // Atomic React state updates
+    setLessons(prev => prev.map(l => l.id === lessonId ? updatedLesson : l));
+    if (newCharge) {
+      setCharges(prev => [...prev, newCharge!]);
+    }
+    setPayments(prev => [...prev, newPayment]);
+    setPaymentAllocations(prev => [...prev, newAlloc]);
+    if (newIncome) {
+      setIncomeEntries(prev => [...prev, newIncome!]);
+    } else if (updatedIncome) {
+      setIncomeEntries(prev => prev.map(e => e.id === updatedIncome!.id ? updatedIncome! : e));
+    }
+  }, [lessons, charges, incomeEntries, todayStr, assertNotClosedPeriod, commitChange, getNextIncomeNumber]);
+
+  /**
    * POINT 1 & 2 FIX:
    * Marking a lesson as 'completed' (from start swipe, calendar, or modal)
    * GUARANTEES that a Charge and an IncomeEntry (unpaid) are created!
@@ -369,7 +508,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Ensure lesson is completed and charge exists
     if (lesson.status !== 'completed') {
-      await markLessonCompleted(lessonId);
+      await completeAndPayLesson(lessonId, method);
+      return;
     }
 
     const targetCharge = charges.find(c => c.lesson_id === lesson.id && c.amount > 0);
@@ -420,7 +560,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await commitChange('income_entries', 'update', updatedEntry);
       setIncomeEntries(prev => prev.map(e => e.id === entry.id ? updatedEntry : e));
     }
-  }, [lessons, charges, incomeEntries, todayStr, markLessonCompleted, commitChange]);
+  }, [lessons, charges, incomeEntries, todayStr, completeAndPayLesson, commitChange]);
 
   const updateLessonStatus = useCallback(async (lessonId: UUID, status: Lesson['status'], note?: string) => {
     const lesson = lessons.find(l => l.id === lessonId);
@@ -799,6 +939,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await refreshFromIDB();
   }, [refreshFromIDB]);
 
+  const dismissRejectedOperation = useCallback(async (opId: UUID) => {
+    await IDBManager.delete('rejected_operations', opId);
+    setRejectedOperations(prev => prev.filter(op => op.op_id !== opId));
+  }, []);
+
+  const clearAllRejectedOperations = useCallback(async () => {
+    const db = await IDBManager.getDB();
+    const tx = db.transaction('rejected_operations', 'readwrite');
+    tx.objectStore('rejected_operations').clear();
+    await new Promise((res, rej) => {
+      tx.oncomplete = () => res(true);
+      tx.onerror = () => rej(tx.error);
+    });
+    setRejectedOperations([]);
+  }, []);
+
   const value = useMemo(() => ({
     isReady,
     isLocked,
@@ -821,11 +977,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     auditLogs,
     settings,
     offlineQueue,
+    rejectedOperations,
     todayStr,
     activeLegalParam,
     limitStatus,
     unconfirmedLessons,
     offlineQueueCount: offlineQueue.length,
+    rejectedOperationsCount: rejectedOperations.length,
+    completeAndPayLesson,
     markLessonCompleted,
     recordLessonPayment,
     updateLessonStatus,
@@ -840,6 +999,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     updateLegalParams,
     updateSettings,
     acceptLegalDeclaration,
+    dismissRejectedOperation,
+    clearAllRejectedOperations,
     syncStatus,
     syncNow,
     testConnection,
@@ -869,10 +1030,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     auditLogs,
     settings,
     offlineQueue,
+    rejectedOperations,
     todayStr,
     activeLegalParam,
     limitStatus,
     unconfirmedLessons,
+    completeAndPayLesson,
     markLessonCompleted,
     recordLessonPayment,
     updateLessonStatus,
@@ -887,6 +1050,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     updateLegalParams,
     updateSettings,
     acceptLegalDeclaration,
+    dismissRejectedOperation,
+    clearAllRejectedOperations,
     syncStatus,
     syncNow,
     testConnection,

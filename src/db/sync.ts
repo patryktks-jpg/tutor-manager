@@ -151,6 +151,8 @@ export async function syncWithGas(
     const pullJson = await pullRes.json();
 
     if (pullJson.status === 'ok' && pullJson.data) {
+      let maxUpdatedAt = settings.last_sync_at || '1970-01-01T00:00:00Z';
+
       for (const table of Object.keys(pullJson.data)) {
         if (table === 'settings') continue; // Nigdy nie nadpisuj lokalnych ustawień bezpieczeństwa z arkusza!
         const rows = pullJson.data[table];
@@ -158,15 +160,18 @@ export async function syncWithGas(
           for (const row of rows) {
             await IDBManager.put(table, row);
             pulledCount++;
+            if (row.updated_at && row.updated_at > maxUpdatedAt) {
+              maxUpdatedAt = row.updated_at;
+            }
           }
         }
       }
 
-      // Aktualizuj last_sync_at TYLKO po pełnym sukcesie pobierania!
-      const nowIso = new Date().toISOString();
+      // Aktualizuj last_sync_at bazując na czasie serwera lub maksymalnym updated_at pobranych danych (PUNKT 2 FIX)
+      const syncTimestamp = pullJson.server_time || (maxUpdatedAt > (settings.last_sync_at || '') ? maxUpdatedAt : new Date().toISOString());
       await IDBManager.put('settings', {
         ...settings,
-        last_sync_at: nowIso
+        last_sync_at: syncTimestamp
       });
     } else {
       return {

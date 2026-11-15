@@ -3,10 +3,11 @@ import { useApp } from '../../context/AppContext';
 import { Money } from '../../domain/money';
 import { Lesson, UUID } from '../../domain/types';
 import { findLessonConflicts } from '../../domain/series';
+import { getWarsawDateStr } from '../../domain/dateUtils';
 import { IconAlertTriangle, IconCheck, IconPlus, IconX } from '../common/Icons';
 
 export const CalendarView: React.FC = () => {
-  const { lessons, students, createLesson, updateLessonStatus, rescheduleLesson } = useApp();
+  const { lessons, students, todayStr, createLesson, updateLessonStatus, rescheduleLesson } = useApp();
   const [viewMode, setViewMode] = useState<'day' | 'week' | 'month'>('week');
 
   // Selected date reference
@@ -18,7 +19,7 @@ export const CalendarView: React.FC = () => {
 
   // New lesson form state
   const [newStudentId, setNewStudentId] = useState<UUID>(students[0]?.id || '');
-  const [newDate, setNewDate] = useState(new Date().toISOString().slice(0, 10));
+  const [newDate, setNewDate] = useState(() => getWarsawDateStr());
   const [newTime, setNewTime] = useState('16:00');
   const [newDuration, setNewDuration] = useState(60);
   const [newSubject, setNewSubject] = useState('Matematyka');
@@ -141,8 +142,8 @@ export const CalendarView: React.FC = () => {
       {/* Week View Grid */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {weekDays.map(dayDate => {
-          const dayDateStr = `${dayDate.getFullYear()}-${String(dayDate.getMonth() + 1).padStart(2, '0')}-${String(dayDate.getDate()).padStart(2, '0')}`;
-          const isToday = dayDateStr === new Date().toISOString().slice(0, 10);
+          const dayDateStr = getWarsawDateStr(dayDate);
+          const isToday = dayDateStr === todayStr;
 
           const dayLessons = lessons
             .filter(l => l.start_at.slice(0, 10) === dayDateStr)

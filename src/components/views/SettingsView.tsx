@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Money } from '../../domain/money';
 import { PaymentMethod } from '../../domain/types';
+import { getWarsawDateStr } from '../../domain/dateUtils';
 import { IconCheck, IconLock, IconRefresh } from '../common/Icons';
 
 interface SettingsViewProps {
@@ -12,6 +13,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
   const {
     settings,
     activeLegalParam,
+    rejectedOperations,
+    clearAllRejectedOperations,
     updateSettings,
     updateLegalParams,
     acceptLegalDeclaration,
@@ -100,7 +103,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `tutor_manager_backup_${new Date().toISOString().slice(0, 10)}.json`;
+    link.download = `tutor_manager_backup_${getWarsawDateStr()}.json`;
     link.click();
     URL.revokeObjectURL(url);
   };
@@ -320,6 +323,24 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
             {settings.last_sync_at && (
               <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)', marginTop: 4, textAlign: 'center' }}>
                 Ostatnia synchronizacja: {new Date(settings.last_sync_at).toLocaleString('pl-PL')}
+              </div>
+            )}
+
+            {rejectedOperations.length > 0 && (
+              <div style={{ marginTop: 10, padding: 8, borderRadius: 8, background: 'rgba(255,59,48,0.1)', border: '1px solid rgba(255,59,48,0.3)' }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--ios-red)', marginBottom: 4 }}>
+                  ⚠️ Odrzucone operacje w Arkuszu: {rejectedOperations.length}
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)', marginBottom: 6 }}>
+                  Serwer Google Apps Script odrzucił te operacje (np. zamknięty okres lub konflikt wersji).
+                </div>
+                <button
+                  onClick={clearAllRejectedOperations}
+                  className="ios-btn ios-btn-secondary"
+                  style={{ width: '100%', fontSize: 11, padding: '4px 8px', color: 'var(--ios-red)' }}
+                >
+                  Wyczyść listę odrzuconych operacji
+                </button>
               </div>
             )}
           </div>

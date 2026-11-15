@@ -3,6 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { Money } from '../../domain/money';
 import { Lesson, PaymentMethod } from '../../domain/types';
 import { getChargesBalance } from '../../domain/allocation';
+import { getWarsawWeekRange } from '../../domain/dateUtils';
 import { SwipeableCard } from '../common/SwipeableCard';
 import { NotificationBanner } from '../common/NotificationBanner';
 import { IconGear, IconCheck, IconX, IconCalendar, IconStudents } from '../common/Icons';
@@ -22,6 +23,10 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
     paymentAllocations,
     limitStatus,
     todayStr,
+    rejectedOperations,
+    dismissRejectedOperation,
+    clearAllRejectedOperations,
+    completeAndPayLesson,
     markLessonCompleted,
     recordLessonPayment,
     updateLessonStatus,
@@ -31,6 +36,7 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
   const [selectedLesson, setSelectedLesson] = useState<Lesson | null>(null);
   const [showActionModal, setShowActionModal] = useState(false);
   const [showPayModal, setShowPayModal] = useState(false);
+  const [showRejectedModal, setShowRejectedModal] = useState(false);
   const [payMethod, setPayMethod] = useState<PaymentMethod>('blik');
   const [rescheduleDate, setRescheduleDate] = useState('');
 
@@ -52,19 +58,9 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
       .sort((a, b) => a.start_at.localeCompare(b.start_at));
   }, [lessons, todayStr]);
 
-  // Weekly stats
+  // Weekly stats calculated in Europe/Warsaw timezone (PUNKT 1 FIX: no UTC midnight day shifting)
   const weeklyStats = useMemo(() => {
-    const [y, m, d] = todayStr.split('-').map(Number);
-    const dateObj = new Date(y, m - 1, d);
-    const day = dateObj.getDay();
-    const diff = dateObj.getDate() - day + (day === 0 ? -6 : 1);
-    const monday = new Date(dateObj.setDate(diff));
-    monday.setHours(0, 0, 0, 0);
-    const sunday = new Date(monday);
-    sunday.setDate(monday.getDate() + 6);
-
-    const monStr = monday.toISOString().slice(0, 10);
-    const sunStr = sunday.toISOString().slice(0, 10);
+    const { mondayStr: monStr, sundayStr: sunStr } = getWarsawWeekRange(todayStr);
 
     const weekLessons = lessons.filter(l => {
       const lDate = l.start_at.slice(0, 10);
@@ -115,9 +111,8 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
 
   const handleSwipeComplete = async (lesson: Lesson) => {
     // SPECYFIKACJA A1: Jedno kliknięcie / swipe po lekcji
-    // („zrealizowana + zapłacona BLIK-iem”) aktualizuje grafik, saldo ucznia, ewidencję i pasek limitu!
-    await markLessonCompleted(lesson.id);
-    await recordLessonPayment(lesson.id, 'blik');
+    // („zrealizowana + zapłacona BLIK-iem”) aktualizuje grafik, saldo ucznia, ewidencję i pasek limitu atomowo!
+    await completeAndPayLesson(lesson.id, 'blik');
   };
 
   const handleSwipeCancel = async (lesson: Lesson) => {
@@ -168,6 +163,37 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
       </div>
 
       <NotificationBanner />
+
+      {/* Rejected Operations Warning Banner (PUNKT 2 FIX) */}
+      {rejectedOperations.length > 0 && (
+        <div
+          onClick={() => setShowRejectedModal(true)}
+          style={{
+            background: 'rgba(255, 59, 48, 0.12)',
+            border: '1px solid rgba(255, 59, 48, 0.35)',
+            borderRadius: 14,
+            padding: '12px 14px',
+            marginBottom: 16,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 20 }}>⚠️</span>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ios-red)' }}>
+                {rejectedOperations.length} {rejectedOperations.length === 1 ? 'odrzucona operacja' : 'odrzucone operacje'} w Arkuszu
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--ios-text-secondary)' }}>
+                Kliknij, aby przejrzeć powód odrzucenia przez Arkusz Google.
+              </div>
+            </div>
+          </div>
+          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--ios-red)' }}>Szczegóły &rarr;</span>
+        </div>
+      )}
 
       {/* Section: Today's lessons card list with swipe */}
       <div style={{ marginBottom: 20 }}>
@@ -509,6 +535,84 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                 }}
               >
                 <IconCheck size={18} /> Zaksięguj wpłatę ({payMethod.toUpperCase()})
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Rejected Operations Modal (PUNKT 2 FIX) */}
+      {showRejectedModal && (
+        <div className="ios-modal-overlay" onClick={() => setShowRejectedModal(false)}>
+          <div className="ios-modal-content" onClick={e => e.stopPropagation()}>
+            <div className="ios-modal-grabber" />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <h3 style={{ fontSize: 18, fontWeight: 700 }}>Odrzucone operacje ({rejectedOperations.length})</h3>
+              <button
+                onClick={() => setShowRejectedModal(false)}
+                className="ios-btn ios-btn-secondary"
+                style={{ padding: '4px 8px', fontSize: 12 }}
+              >
+                Zamknij
+              </button>
+            </div>
+
+            <p style={{ fontSize: 13, color: 'var(--ios-text-secondary)', marginBottom: 14 }}>
+              Operacje, których Google Apps Script nie mógł zapisać w Arkuszu (np. próba zapisu w zamkniętym okresie rozliczeniowym lub konflikt wersji).
+            </p>
+
+            <div style={{ maxHeight: 320, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {rejectedOperations.map(op => (
+                <div
+                  key={op.op_id}
+                  style={{
+                    background: 'var(--ios-bg)',
+                    borderRadius: 12,
+                    padding: 12,
+                    border: '1px solid var(--ios-border)'
+                  }}
+                >
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, textTransform: 'uppercase' }}>
+                      {op.action} • {op.table}
+                    </span>
+                    <button
+                      onClick={() => dismissRejectedOperation(op.op_id)}
+                      className="ios-btn ios-btn-secondary"
+                      style={{ padding: '2px 8px', fontSize: 11, minHeight: 24, color: 'var(--ios-red)' }}
+                    >
+                      Usuń
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 12, color: 'var(--ios-red)', fontWeight: 600, marginBottom: 4 }}>
+                    Powód: {op.error || 'Odrzucono przez serwer'}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)' }}>
+                    Czas operacji: {op.timestamp.slice(0, 19).replace('T', ' ')}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+              <button
+                className="ios-btn ios-btn-secondary"
+                style={{ flex: 1, color: 'var(--ios-red)' }}
+                onClick={async () => {
+                  if (confirm('Czy na pewno chcesz usunąć wszystkie odrzucone operacje z listy?')) {
+                    await clearAllRejectedOperations();
+                    setShowRejectedModal(false);
+                  }
+                }}
+              >
+                Wyczyść wszystkie
+              </button>
+              <button
+                className="ios-btn ios-btn-primary"
+                style={{ flex: 1 }}
+                onClick={() => setShowRejectedModal(false)}
+              >
+                Rozumiem
               </button>
             </div>
           </div>

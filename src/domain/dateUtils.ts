@@ -33,3 +33,30 @@ export function getWarsawDateTimeStr(d: Date = new Date()): string {
   }
   return `${map.year}-${map.month}-${map.day}T${map.hour}:${map.minute}:${map.second}`;
 }
+
+/**
+ * Calculates Monday-to-Sunday week range for any given YYYY-MM-DD date.
+ * Anchored at local noon (12:00) so timezone / DST switches never shift the day.
+ */
+export function getWarsawWeekRange(dateStr: string): { mondayStr: string; sundayStr: string; days: string[] } {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dateObj = new Date(y, m - 1, d, 12, 0, 0);
+  const day = dateObj.getDay(); // 0 is Sunday, 1 is Monday, ...
+  const diffToMonday = day === 0 ? -6 : 1 - day;
+
+  const monday = new Date(dateObj);
+  monday.setDate(dateObj.getDate() + diffToMonday);
+
+  const days: string[] = [];
+  for (let i = 0; i < 7; i++) {
+    const cur = new Date(monday);
+    cur.setDate(monday.getDate() + i);
+    days.push(getWarsawDateStr(cur));
+  }
+
+  return {
+    mondayStr: days[0],
+    sundayStr: days[6],
+    days
+  };
+}

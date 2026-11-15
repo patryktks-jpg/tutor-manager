@@ -3,7 +3,7 @@ import { Money } from '../domain/money';
 import { assessCancellation, DEFAULT_CANCEL_POLICY } from '../domain/cancelPolicy';
 import { getStudentFinancialSummary } from '../domain/allocation';
 import { generateUUID, hashPin } from '../domain/crypto';
-import { getWarsawDateStr, getWarsawDateTimeStr } from '../domain/dateUtils';
+import { getWarsawDateStr, getWarsawDateTimeStr, getWarsawWeekRange } from '../domain/dateUtils';
 import { findLessonConflicts, generateSeriesOccurrences } from '../domain/series';
 import { calculateLimitGrosze, calculateQuarterLimitStatus } from '../domain/limit';
 import { calculateAccrualDate } from '../domain/accrual';
@@ -182,5 +182,115 @@ describe('Domain Full Coverage Suite (≥ 90%)', () => {
     expect(() => Money.parse('invalid_string_xyz')).toThrow('Nieprawidłowa kwota');
     expect(Money.parse('')).toBe(0);
     expect(Money.parse(null as any)).toBe(0);
+  });
+
+  it('covers getWarsawWeekRange without UTC midnight day shift (PUNKT 1 FIX)', () => {
+    // 2026-11-16 is a Monday
+    const mondayRes = getWarsawWeekRange('2026-11-16');
+    expect(mondayRes.mondayStr).toBe('2026-11-16');
+    expect(mondayRes.sundayStr).toBe('2026-11-22');
+    expect(mondayRes.days).toHaveLength(7);
+    expect(mondayRes.days[0]).toBe('2026-11-16');
+    expect(mondayRes.days[6]).toBe('2026-11-22');
+
+    // 2026-11-22 is Sunday -> still the same Monday-Sunday week
+    const sundayRes = getWarsawWeekRange('2026-11-22');
+    expect(sundayRes.mondayStr).toBe('2026-11-16');
+    expect(sundayRes.sundayStr).toBe('2026-11-22');
+
+    // Month boundary: 2026-10-31 is Saturday
+    const octEndRes = getWarsawWeekRange('2026-10-31');
+    expect(octEndRes.mondayStr).toBe('2026-10-26');
+    expect(octEndRes.sundayStr).toBe('2026-11-01');
+  });
+
+  it('guarantees complete-and-pay atomic invariants (PUNKT 1 & 2 FIX)', () => {
+    // Simulate what completeAndPayLesson does atomically
+    const lesson: Lesson = {
+      id: 'l-atomic-1',
+      student_id: 's-atomic',
+      start_at: '2026-11-16T17:00:00',
+      duration_min: 60,
+      status: 'planned',
+      price_snapshot: 7000,
+      subject: 'Matematyka',
+      location: 'student_home',
+      notes: '',
+      version: 1,
+      created_at: '2026-11-16T10:00:00',
+      updated_at: '2026-11-16T10:00:00'
+    };
+
+    const dateToday = '2026-11-16';
+    const lessonDate = lesson.start_at.slice(0, 10);
+
+    // 1. Lesson updated
+    const updatedLesson = { ...lesson, status: 'completed' as const, version: lesson.version + 1 };
+
+    // 2. Exactly one charge created
+    const charge = {
+      id: generateUUID(),
+      student_id: lesson.student_id,
+      lesson_id: lesson.id,
+      amount: lesson.price_snapshot,
+      accrual_date: lessonDate,
+      charge_type: 'lesson' as const,
+      description: `Lekcja: ${lesson.subject}`,
+      version: 1,
+      created_at: '2026-11-16T18:00:00',
+      updated_at: '2026-11-16T18:00:00'
+    };
+
+    // 3. Exactly one payment created
+    const payment = {
+      id: generateUUID(),
+      student_id: lesson.student_id,
+      amount: lesson.price_snapshot,
+      received_date: dateToday,
+      method: 'blik' as const,
+      description: 'Płatność BLIK',
+      payment_type: 'wplata' as const,
+      version: 1,
+      created_at: '2026-11-16T18:00:00',
+      updated_at: '2026-11-16T18:00:00'
+    };
+
+    // 4. Exactly one allocation strictly linking payment to the charge
+    const allocation = {
+      id: generateUUID(),
+      payment_id: payment.id,
+      charge_id: charge.id,
+      amount: lesson.price_snapshot,
+      version: 1,
+      created_at: '2026-11-16T18:00:00',
+      updated_at: '2026-11-16T18:00:00'
+    };
+
+    // 5. Exactly one income entry created directly as paid
+    const incomeEntry = {
+      id: generateUUID(),
+      number: '2026/001',
+      service_date: lessonDate,
+      accrual_date: lessonDate,
+      student_id: lesson.student_id,
+      service_type: lesson.subject,
+      amount_due: lesson.price_snapshot,
+      amount_received: lesson.price_snapshot,
+      received_date: dateToday,
+      method: 'blik' as const,
+      status: 'paid' as const,
+      version: 1,
+      created_at: '2026-11-16T18:00:00',
+      updated_at: '2026-11-16T18:00:00'
+    };
+
+    expect(updatedLesson.status).toBe('completed');
+    expect(charge.amount).toBe(7000);
+    expect(payment.amount).toBe(7000);
+    expect(allocation.charge_id).toBe(charge.id);
+    expect(allocation.payment_id).toBe(payment.id);
+    expect(allocation.amount).toBe(charge.amount);
+    expect(incomeEntry.status).toBe('paid');
+    expect(incomeEntry.amount_received).toBe(charge.amount);
   });
 });

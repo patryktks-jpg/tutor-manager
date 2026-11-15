@@ -55,6 +55,7 @@ export interface AppDatabaseSchema {
   audit_logs: AuditLog[];
   settings: Settings;
   offline_queue: OfflineOperation[];
+  rejected_operations: OfflineOperation[];
 }
 
 export class IDBManager {
@@ -133,7 +134,8 @@ export class IDBManager {
       report_snapshots: await this.getAll<ReportSnapshot>(db, 'report_snapshots'),
       audit_logs: await this.getAll<AuditLog>(db, 'audit_logs'),
       settings: (await this.get<Settings>(db, 'settings', INITIAL_SETTINGS.id)) || INITIAL_SETTINGS,
-      offline_queue: await this.getAll<OfflineOperation>(db, 'offline_queue')
+      offline_queue: await this.getAll<OfflineOperation>(db, 'offline_queue'),
+      rejected_operations: await this.getAll<OfflineOperation>(db, 'rejected_operations')
     };
 
     return state;
