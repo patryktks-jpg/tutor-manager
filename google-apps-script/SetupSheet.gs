@@ -1,11 +1,9 @@
 /**
- * SetupSheet.gs - Automatyczny kreator struktury Arkusza Google dla Tutor Manager
+ * SetupSheet.gs - Automatyczny kreator struktury Arkusza Google dla Tutor Manager (v2.3)
  *
- * Uruchom funkcję 'initializeAllSheets()', aby:
- * 1. Utworzyć wszystkie zakładki zgodnie z Rozdziałem 3 specyfikacji
- * 2. Skonfigurować nagłówki kolumn
- * 3. Ustawić formatowanie
- * 4. Zainstalować codzienny wyzwalacz kopii zapasowej
+ * Poprawka kluczowa:
+ * - Ustawienie formatowania kolumn jako 'Tekst zwykły' (@), aby zapobiec
+ *   automatycznej konwersji dat na obiekty Date i przesunięciom strefy czasowej!
  */
 
 function initializeAllSheets() {
@@ -75,10 +73,13 @@ function initializeAllSheets() {
     ],
     settings: [
       'id', 'tutor_name', 'default_rate', 'default_duration_min', 'default_payment_method',
-      'work_hours_start', 'work_hours_end', 'work_days', 'breaks_min', 'pin_hash',
-      'pin_enabled', 'biometrics_enabled', 'auto_lock_min', 'legal_declaration_accepted_at',
-      'warning_thresholds', 'gas_web_app_url', 'gas_secret_token', 'last_sync_at',
+      'work_hours_start', 'work_hours_end', 'work_days', 'breaks_min',
+      'auto_lock_min', 'legal_declaration_accepted_at',
+      'warning_thresholds', 'last_sync_at',
       'version', 'created_at', 'updated_at'
+    ],
+    processed_ops: [
+      'op_id', 'processed_at'
     ]
   };
 
@@ -92,44 +93,53 @@ function initializeAllSheets() {
     }
 
     var headers = schemas[name];
-    var currentRange = sheet.getRange(1, 1, 1, headers.length);
-    currentRange.setValues([headers]);
+    var headerRange = sheet.getRange(1, 1, 1, headers.length);
+    headerRange.setValues([headers]);
 
-    // Stylizacja nagłówków
-    currentRange.setBackground('#007AFF');
-    currentRange.setFontColor('#FFFFFF');
-    currentRange.setFontWeight('bold');
+    headerRange.setBackground('#007AFF');
+    headerRange.setFontColor('#FFFFFF');
+    headerRange.setFontWeight('bold');
     sheet.setFrozenRows(1);
+
+    // PUNKT 2: Ustawienie formatowania całego arkusza jako TEKST ZWYKŁY (@),
+    // aby zapobiec samoczynnemu parsowaniu dat i przesunięciom stref czasowych!
+    sheet.getRange(2, 1, sheet.getMaxRows() - 1, headers.length).setNumberFormat('@');
   }
 
-  // Usunięcie domyślnego pustego arkusza "Arkusz 1" jeśli istnieje
   var defaultSheet = ss.getSheetByName('Arkusz1') || ss.getSheetByName('Sheet1');
   if (defaultSheet && ss.getSheets().length > 1) {
     try { ss.deleteSheet(defaultSheet); } catch (e) {}
   }
 
-  // Konfiguracja wyzwalacza codziennej kopii zapasowej (o godzinie 02:00 w nocy)
-  setupDailyBackupTrigger();
-
-  SpreadsheetApp.getUi().alert('Struktura Arkusza Google dla Tutor Manager została pomyślnie utworzona!');
+  setupTriggers();
+  SpreadsheetApp.getUi().alert('Struktura Arkusza Google dla Tutor Manager została pomyślnie utworzona i zabezpieczona!');
 }
 
-function setupDailyBackupTrigger() {
+function setupTriggers() {
   var triggers = ScriptApp.getProjectTriggers();
-  var triggerExists = false;
+  var backupExists = false;
+  var alertExists = false;
 
   for (var i = 0; i < triggers.length; i++) {
-    if (triggers[i].getHandlerFunction() === 'createDailyBackup') {
-      triggerExists = true;
-      break;
-    }
+    var fn = triggers[i].getHandlerFunction();
+    if (fn === 'createDailyBackup') backupExists = true;
+    if (fn === 'sendWeeklyTutorAlerts') alertExists = true;
   }
 
-  if (!triggerExists) {
+  if (!backupExists) {
     ScriptApp.newTrigger('createDailyBackup')
       .timeBased()
       .atHour(2)
       .everyDays(1)
+      .inTimezone('Europe/Warsaw')
+      .create();
+  }
+
+  if (!alertExists) {
+    ScriptApp.newTrigger('sendWeeklyTutorAlerts')
+      .timeBased()
+      .onWeekDay(ScriptApp.WeekDay.MONDAY)
+      .atHour(8)
       .inTimezone('Europe/Warsaw')
       .create();
   }

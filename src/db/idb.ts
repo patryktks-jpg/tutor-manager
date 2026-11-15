@@ -85,12 +85,13 @@ export class IDBManager {
           'report_snapshots',
           'audit_logs',
           'settings',
-          'offline_queue'
+          'offline_queue',
+          'rejected_operations'
         ];
 
         for (const s of stores) {
           if (!db.objectStoreNames.contains(s)) {
-            if (s === 'offline_queue') {
+            if (s === 'offline_queue' || s === 'rejected_operations') {
               db.createObjectStore(s, { keyPath: 'op_id' });
             } else {
               db.createObjectStore(s, { keyPath: 'id' });

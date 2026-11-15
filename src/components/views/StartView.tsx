@@ -114,7 +114,10 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
   }, [charges, paymentAllocations]);
 
   const handleSwipeComplete = async (lesson: Lesson) => {
+    // SPECYFIKACJA A1: Jedno kliknięcie / swipe po lekcji
+    // („zrealizowana + zapłacona BLIK-iem”) aktualizuje grafik, saldo ucznia, ewidencję i pasek limitu!
     await markLessonCompleted(lesson.id);
+    await recordLessonPayment(lesson.id, 'blik');
   };
 
   const handleSwipeCancel = async (lesson: Lesson) => {
@@ -194,7 +197,7 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
             return (
               <SwipeableCard
                 key={lesson.id}
-                rightLabel="Zrealizowana"
+                rightLabel="Zrealizowana + BLIK"
                 leftLabel="Odwołaj"
                 onSwipeRight={() => !isCompleted && handleSwipeComplete(lesson)}
                 onSwipeLeft={() => !isCompleted && !isCancelled && handleSwipeCancel(lesson)}
@@ -390,26 +393,41 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {selectedLesson.status !== 'completed' && (
-                <button
-                  className="ios-btn ios-btn-primary"
-                  onClick={async () => {
-                    await markLessonCompleted(selectedLesson.id);
-                    setShowActionModal(false);
-                  }}
-                >
-                  <IconCheck size={18} /> Oznacz jako zrealizowaną
-                </button>
+                <>
+                  <button
+                    className="ios-btn ios-btn-success"
+                    onClick={async () => {
+                      await markLessonCompleted(selectedLesson.id);
+                      await recordLessonPayment(selectedLesson.id, 'blik');
+                      setShowActionModal(false);
+                    }}
+                  >
+                    <IconCheck size={18} /> Zrealizowana + Zapłacona BLIK (A1)
+                  </button>
+
+                  <button
+                    className="ios-btn ios-btn-primary"
+                    onClick={async () => {
+                      await markLessonCompleted(selectedLesson.id);
+                      setShowActionModal(false);
+                    }}
+                  >
+                    <IconCheck size={18} /> Zrealizowana (Do zapłaty)
+                  </button>
+                </>
               )}
 
-              <button
-                className="ios-btn ios-btn-success"
-                onClick={() => {
-                  setShowActionModal(false);
-                  setShowPayModal(true);
-                }}
-              >
-                <IconCheck size={18} /> Zarejestruj wpłatę
-              </button>
+              {selectedLesson.status === 'completed' && (
+                <button
+                  className="ios-btn ios-btn-success"
+                  onClick={() => {
+                    setShowActionModal(false);
+                    setShowPayModal(true);
+                  }}
+                >
+                  <IconCheck size={18} /> Zarejestruj wpłatę
+                </button>
+              )}
 
               <button
                 className="ios-btn ios-btn-danger"

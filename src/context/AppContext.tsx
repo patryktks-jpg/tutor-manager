@@ -21,6 +21,7 @@ import {
   PaymentMethod
 } from '../domain/types';
 import { generateUUID, hashPin } from '../domain/crypto';
+import { getWarsawDateStr } from '../domain/dateUtils';
 import { IDBManager } from '../db/idb';
 import { syncWithGas, testGasConnection, SyncResult } from '../db/sync';
 import { calculateQuarterLimitStatus, LimitStatus } from '../domain/limit';
@@ -92,11 +93,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [isReady, setIsReady] = useState(false);
   const [isLocked, setIsLocked] = useState(false);
 
-  // Dynamic date state that refreshes when app gains focus or periodically
-  const [todayStr, setTodayStr] = useState(() => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  });
+  // Dynamic date state in Europe/Warsaw timezone (PUNKT 9 FIX)
+  const [todayStr, setTodayStr] = useState(() => getWarsawDateStr());
 
   const [students, setStudents] = useState<Student[]>([]);
   const [guardians, setGuardians] = useState<Guardian[]>([]);
@@ -124,9 +122,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Keep today's date fresh even when iPhone Safari wakes from background
   useEffect(() => {
     const updateDate = () => {
-      const d = new Date();
-      const current = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      setTodayStr(current);
+      setTodayStr(getWarsawDateStr());
     };
 
     window.addEventListener('visibilitychange', updateDate);
@@ -769,6 +765,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         success: false,
         pushedCount: 0,
         pulledCount: 0,
+        rejectedCount: 0,
         message: 'Błąd synchronizacji',
         error: err.message
       };

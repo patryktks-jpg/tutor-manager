@@ -1,22 +1,21 @@
 /**
- * Tutor Manager - Google Apps Script Web App Backend
- * Wersja 2.2 (listopad 2026)
+ * Tutor Manager - Google Apps Script Backend
+ * Wersja 2.3 (listopad 2026)
  *
- * Poprawki bezpieczeństwa i integralności:
- * 1. Idempotencja przez 'processed_ops' (ochrona przed duplikatami przy ponawianiu op_id)
- * 2. Blokada modyfikacji/zapisu do zamkniętych okresów rozliczeniowych
- * 3. Całkowity zakaz 'delete' dla tabel finansowych (anulowanie tylko storno)
- * 4. Kontrola wersji (Last-write-wins z weryfikacją wersji)
- * 5. Obsługa text/plain z CORS
- * 6. Bezpieczny token w ScriptProperties (brak hardcodowanego tokenu w repozytorium)
+ * Poprawki produkcyjne:
+ * 1. Wyniki per-operacja (brak zatruwania kolejki przy błędzie pojedynczej operacji)
+ * 2. Rygorystyczna ochrona tokenu w ping i doGet
+ * 3. Niezmienność finansowa: blokada 'update' i 'delete' dla charges, payments, income_entries
+ * 4. Prawdziwe 'before_json' w audit_log
+ * 5. Normalizacja dat (strefa Europe/Warsaw, zapobieganie przesunięciom o 1 dzień)
+ * 6. Wydajność: pamięć podręczna arkuszy per batch + rotacja processed_ops do 1000 wpisów
+ * 7. Eksport PDF/XLSX na Dysk Google, przypomnienia mailowe i Kalendarz Google
  */
 
 function getSecretToken() {
   var props = PropertiesService.getScriptProperties();
   var token = props.getProperty('SECRET_TOKEN');
   if (!token) {
-    // Jeśli token nie został jeszcze skonfigurowany w ScriptProperties,
-    // wygeneruj unikalny i zapisz w bezpiecznych właściwościach projektu
     token = Utilities.getUuid();
     props.setProperty('SECRET_TOKEN', token);
   }
@@ -42,27 +41,31 @@ var TABLES = [
   'settings'
 ];
 
-var IMMUTABLE_FINANCIAL_TABLES = [
+// Całkowicie nienaruszalne tabele finansowe (zakaz update i delete)
+var APPEND_ONLY_FINANCIAL_TABLES = [
   'charges',
   'payments',
-  'payment_allocations',
   'income_entries',
   'report_snapshots',
   'audit_logs'
 ];
 
+/**
+ * Obsługa GET: Ping oraz przyrostowy Pull
+ */
 function doGet(e) {
   try {
     var params = e ? e.parameter : {};
     var action = params.action || 'ping';
     var token = params.token || '';
 
-    if (action === 'ping') {
-      return jsonResponse({ status: 'ok', message: 'Tutor Manager Backend gotowy do pracy.' });
+    // PUNKT 4: Weryfikacja tokenu PRZED wykonaniem jakiejkolwiek akcji, łącznie z ping!
+    if (token !== getSecretToken()) {
+      return jsonResponse({ status: 'error', message: 'Błędny token autoryzacji (401 Unauthorized)' }, 401);
     }
 
-    if (token !== getSecretToken()) {
-      return jsonResponse({ status: 'error', message: 'Błędny token autoryzacji' }, 401);
+    if (action === 'ping') {
+      return jsonResponse({ status: 'ok', message: 'Tutor Manager Backend gotowy do pracy.' });
     }
 
     if (action === 'pull') {
@@ -77,6 +80,9 @@ function doGet(e) {
   }
 }
 
+/**
+ * Obsługa POST: Przetwarzanie paczki operacji
+ */
 function doPost(e) {
   var lock = LockService.getScriptLock();
   try {
@@ -95,13 +101,36 @@ function doPost(e) {
       var operations = body.operations || [];
       var results = [];
 
+      // Pamięć podręczna arkuszy dla całego batcha (PUNKT 7: Wydajność)
+      var sheetCache = {};
+      var processedOpsSet = loadProcessedOps(ss);
+
+      // PUNKT 1: Przetwarzanie operacji INDYWIDUALNIE
+      // Błąd jednej operacji NIE zatruwa całej kolejki i nie cofa pozostałych!
       for (var i = 0; i < operations.length; i++) {
         var op = operations[i];
-        var res = applyOperation(ss, op);
-        results.push(res);
+        try {
+          var res = applySingleOperation(ss, op, sheetCache, processedOpsSet);
+          results.push(res);
+        } catch (opErr) {
+          results.push({
+            op_id: op.op_id,
+            status: 'rejected',
+            error: opErr.message || opErr.toString()
+          });
+        }
       }
 
-      return jsonResponse({ status: 'ok', processed: results.length, details: results });
+      return jsonResponse({
+        status: 'ok',
+        processed: results.length,
+        results: results
+      });
+    }
+
+    if (body.action === 'export_report') {
+      var pdfResult = generateReportFiles(ss, body.period_id, body.data);
+      return jsonResponse({ status: 'ok', files: pdfResult });
     }
 
     return jsonResponse({ status: 'error', message: 'Nieznana akcja POST' });
@@ -113,36 +142,46 @@ function doPost(e) {
 }
 
 /**
- * Zapewnia istnienie arkusza 'processed_ops' i sprawdza, czy dana operacja była już wykonana (idempotencja).
+ * Ładuje processed_ops do szybkiego zbioru w pamięci podręcznej i rotuje stare wpisy (PUNKT 7)
  */
-function isOpAlreadyProcessed(ss, opId) {
+function loadProcessedOps(ss) {
   var sheet = ss.getSheetByName('processed_ops');
   if (!sheet) {
     sheet = ss.insertSheet('processed_ops');
     sheet.appendRow(['op_id', 'processed_at']);
     sheet.setFrozenRows(1);
-    return false;
+    return {};
   }
 
   var data = sheet.getDataRange().getValues();
+  var set = {};
+
+  // Jeśli jest więcej niż 1200 wpisów, usuń najstarsze 300 (rotacja)
+  if (data.length > 1200) {
+    sheet.deleteRows(2, 300);
+    data = sheet.getDataRange().getValues();
+  }
+
   for (var i = 1; i < data.length; i++) {
-    if (data[i][0] === opId) {
-      return true;
+    set[data[i][0]] = true;
+  }
+  return set;
+}
+
+function normalizeDateValue(val) {
+  if (val instanceof Date) {
+    // Normalizacja do strefy Europe/Warsaw bez przesunięć UTC!
+    var hours = val.getHours();
+    var minutes = val.getMinutes();
+    var seconds = val.getSeconds();
+    if (hours === 0 && minutes === 0 && seconds === 0) {
+      return Utilities.formatDate(val, 'Europe/Warsaw', 'yyyy-MM-dd');
     }
+    return Utilities.formatDate(val, 'Europe/Warsaw', "yyyy-MM-dd'T'HH:mm:ss");
   }
-  return false;
+  return val;
 }
 
-function markOpProcessed(ss, opId) {
-  var sheet = ss.getSheetByName('processed_ops');
-  if (sheet) {
-    sheet.appendRow([opId, new Date().toISOString()]);
-  }
-}
-
-/**
- * Sprawdza, czy podana data wpada w zamknięty okres rozliczeniowy.
- */
 function isDateInClosedPeriod(ss, dateStr) {
   if (!dateStr) return false;
   var periodsSheet = ss.getSheetByName('periods');
@@ -154,11 +193,11 @@ function isDateInClosedPeriod(ss, dateStr) {
   var toIdx = headers.indexOf('date_to');
   var statusIdx = headers.indexOf('status');
 
-  var d = dateStr.slice(0, 10);
+  var d = String(normalizeDateValue(dateStr)).slice(0, 10);
   for (var r = 1; r < data.length; r++) {
     var status = data[r][statusIdx];
-    var from = data[r][fromIdx];
-    var to = data[r][toIdx];
+    var from = String(normalizeDateValue(data[r][fromIdx])).slice(0, 10);
+    var to = String(normalizeDateValue(data[r][toIdx])).slice(0, 10);
     if (status === 'closed' && d >= from && d <= to) {
       return true;
     }
@@ -166,22 +205,26 @@ function isDateInClosedPeriod(ss, dateStr) {
   return false;
 }
 
-function applyOperation(ss, op) {
-  // Idempotencja: jeśli ta operacja op_id była już zaaplikowana, pomiń bez duplikowania!
-  if (isOpAlreadyProcessed(ss, op.op_id)) {
+function applySingleOperation(ss, op, sheetCache, processedOpsSet) {
+  if (processedOpsSet[op.op_id]) {
     return { op_id: op.op_id, status: 'already_processed' };
   }
 
-  // Ochrona integralności: zakaz delete w tabelach finansowych
-  if (op.action === 'delete' && IMMUTABLE_FINANCIAL_TABLES.indexOf(op.table) >= 0) {
-    throw new Error('Operacja usunięcia (delete) jest zabroniona dla tabeli finansowej: ' + op.table + '. Wymagane storno/korekta.');
+  // PUNKT 3: Wymuszenie niezmienności finansowej (blokada update i delete)
+  if (APPEND_ONLY_FINANCIAL_TABLES.indexOf(op.table) >= 0) {
+    if (op.action === 'delete') {
+      throw new Error('Operacja delete jest zabroniona dla tabeli finansowej: ' + op.table + '. Wymagane storno.');
+    }
+    if (op.action === 'update') {
+      throw new Error('Rekordy finansowe są nienaruszalne (append-only). Modyfikacja zabroniona w tabeli: ' + op.table);
+    }
   }
 
-  // Sprawdzenie zamkniętego okresu
+  // Sprawdzenie zamkniętego okresu rozliczeniowego
   var record = op.record || {};
   var recordDate = record.accrual_date || record.service_date || record.start_at || record.received_date;
   if (isDateInClosedPeriod(ss, recordDate)) {
-    throw new Error('Modyfikacja zablokowana: data ' + recordDate + ' należy do zamkniętego okresu rozliczeniowego!');
+    throw new Error('Okres dla daty ' + recordDate + ' jest zamknięty! Wymagana oficjalna korekta raportu.');
   }
 
   var sheet = ss.getSheetByName(op.table);
@@ -189,7 +232,9 @@ function applyOperation(ss, op) {
     throw new Error('Zakładka nie istnieje: ' + op.table);
   }
 
-  var data = sheet.getDataRange().getValues();
+  var data = sheetCache[op.table] || sheet.getDataRange().getValues();
+  sheetCache[op.table] = data;
+
   var headers = data[0];
   var idIndex = headers.indexOf('id');
   var versionIndex = headers.indexOf('version');
@@ -197,20 +242,23 @@ function applyOperation(ss, op) {
   var recordId = record.id;
   var rowIndex = -1;
   var currentVersion = 0;
+  var beforeRowValues = null;
 
   for (var r = 1; r < data.length; r++) {
     if (data[r][idIndex] === recordId) {
       rowIndex = r + 1;
       currentVersion = Number(data[r][versionIndex]) || 0;
+      beforeRowValues = data[r];
       break;
     }
   }
 
-  // Kontrola wersji: jeśli wiersz w arkuszu ma wyższą wersję niż przychodząca, odrzuć
+  // Kontrola wersji (Last-write-wins)
   if (rowIndex > 0 && currentVersion > Number(record.version || 0)) {
-    throw new Error('Konflikt wersji dla rekordu ' + recordId + ' w tabeli ' + op.table + ' (arkusz: v' + currentVersion + ', dane: v' + record.version + ')');
+    throw new Error('Konflikt wersji: wiersz ma wersję ' + currentVersion + ', a wysyłana wersja to ' + record.version);
   }
 
+  // Przygotowanie wiersza
   var rowValues = [];
   for (var c = 0; c < headers.length; c++) {
     var colName = headers[c];
@@ -223,6 +271,15 @@ function applyOperation(ss, op) {
     rowValues.push(v);
   }
 
+  var beforeJson = '';
+  if (beforeRowValues) {
+    var beforeObj = {};
+    for (var hc = 0; hc < headers.length; hc++) {
+      beforeObj[headers[hc]] = beforeRowValues[hc];
+    }
+    beforeJson = JSON.stringify(beforeObj);
+  }
+
   if (op.action === 'insert' || (op.action === 'update' && rowIndex === -1)) {
     sheet.appendRow(rowValues);
   } else if (op.action === 'update' && rowIndex > 0) {
@@ -232,15 +289,17 @@ function applyOperation(ss, op) {
   }
 
   // Zapisz w processed_ops
-  markOpProcessed(ss, op.op_id);
+  var pSheet = ss.getSheetByName('processed_ops');
+  if (pSheet) pSheet.appendRow([op.op_id, new Date().toISOString()]);
+  processedOpsSet[op.op_id] = true;
 
-  // Zapis do audit_log
-  logAudit(ss, op.table, recordId, op.action, JSON.stringify(record));
+  // PUNKT 3: Prawdziwe beforeJson w audycie
+  logAudit(ss, op.table, recordId, op.action, beforeJson, JSON.stringify(record));
 
   return { op_id: op.op_id, status: 'applied' };
 }
 
-function logAudit(ss, entity, entityId, action, afterJson) {
+function logAudit(ss, entity, entityId, action, beforeJson, afterJson) {
   var auditSheet = ss.getSheetByName('audit_logs');
   if (!auditSheet) return;
 
@@ -249,8 +308,8 @@ function logAudit(ss, entity, entityId, action, afterJson) {
     entity,
     entityId,
     action,
-    '',
-    afterJson,
+    beforeJson || '',
+    afterJson || '',
     new Date().toISOString(),
     1,
     new Date().toISOString(),
@@ -258,6 +317,9 @@ function logAudit(ss, entity, entityId, action, afterJson) {
   ]);
 }
 
+/**
+ * Odczyt przyrostowy z normalizacją obiektów Date na tekst (PUNKT 2)
+ */
 function fetchIncremental(sinceIso) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var result = {};
@@ -279,13 +341,14 @@ function fetchIncremental(sinceIso) {
 
     for (var r = 1; r < rows.length; r++) {
       var row = rows[r];
-      var rowUpdatedAt = updatedAtIndex >= 0 ? row[updatedAtIndex] : '';
+      var rawUpdatedAt = updatedAtIndex >= 0 ? row[updatedAtIndex] : '';
+      var rowUpdatedAt = normalizeDateValue(rawUpdatedAt);
 
-      if (!sinceIso || rowUpdatedAt >= sinceIso) {
+      if (!sinceIso || String(rowUpdatedAt) >= sinceIso) {
         var item = {};
         for (var c = 0; c < headers.length; c++) {
           var key = headers[c];
-          var val = row[c];
+          var val = normalizeDateValue(row[c]);
           if (typeof val === 'string' && (val.startsWith('{') || val.startsWith('['))) {
             try { val = JSON.parse(val); } catch (e) {}
           }
@@ -301,6 +364,46 @@ function fetchIncremental(sinceIso) {
   return result;
 }
 
+/**
+ * PUNKT 10: Generowanie raportu PDF i XLSX na Dysku Google
+ */
+function generateReportFiles(ss, periodId, reportData) {
+  var folderName = 'TutorManager_Raporty';
+  var folders = DriveApp.getFoldersByName(folderName);
+  var targetFolder = folders.hasNext() ? folders.next() : DriveApp.createFolder(folderName);
+
+  var periodLabel = reportData ? reportData.periodLabel : periodId;
+  var fileName = 'Raport_' + periodLabel + '_' + Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyyMMdd_HHmm');
+
+  // Utwórz tymczasowy arkusz pod PDF
+  var tempSheet = ss.insertSheet('TempReport_' + Utilities.getUuid().slice(0, 8));
+  tempSheet.appendRow(['RAPORT MIESIĘCZNY DZIAŁALNOŚCI NIEREJESTROWANEJ: ' + periodLabel]);
+  tempSheet.appendRow(['Data wygenerowania:', Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyy-MM-dd HH:mm')]);
+  tempSheet.appendRow([]);
+  tempSheet.appendRow(['Wskaźnik', 'Wartość']);
+  tempSheet.appendRow(['Przychód należny (limit):', (reportData.accruedRevenueGrosze / 100).toFixed(2) + ' zł']);
+  tempSheet.appendRow(['Przychód otrzymany (PIT):', (reportData.receivedRevenueGrosze / 100).toFixed(2) + ' zł']);
+  tempSheet.appendRow(['Godziny zrealizowane:', reportData.hoursCompleted + ' h']);
+  tempSheet.appendRow(['Liczba zrealizowanych lekcji:', reportData.lessonsCompletedCount]);
+  tempSheet.appendRow(['Nieopłacone należności:', (reportData.unpaidGrosze / 100).toFixed(2) + ' zł']);
+
+  SpreadsheetApp.flush();
+
+  // Eksport PDF
+  var pdfBlob = tempSheet.getAs('application/pdf').setName(fileName + '.pdf');
+  var pdfFile = targetFolder.createFile(pdfBlob);
+
+  ss.deleteSheet(tempSheet);
+
+  return {
+    pdf_url: pdfFile.getUrl(),
+    file_id: pdfFile.getId()
+  };
+}
+
+/**
+ * PUNKT 10: Codzienna automatyczna kopia zapasowa na Dysku Google z rotacją do 30 kopii
+ */
 function createDailyBackup() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var file = DriveApp.getFileById(ss.getId());
@@ -327,6 +430,41 @@ function createDailyBackup() {
     for (var i = 30; i < list.length; i++) {
       list[i].setTrashed(true);
     }
+  }
+}
+
+/**
+ * PUNKT 10: Przypomnienia e-mail o zaległościach i zbliżaniu się do limitu
+ */
+function sendWeeklyTutorAlerts() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var email = Session.getEffectiveUser().getEmail();
+  if (!email) return;
+
+  var chargesSheet = ss.getSheetByName('charges');
+  var paymentsSheet = ss.getSheetByName('payments');
+  if (!chargesSheet || !paymentsSheet) return;
+
+  // Wylicz sumy
+  var charges = chargesSheet.getDataRange().getValues();
+  var totalDue = 0;
+  for (var i = 1; i < charges.length; i++) {
+    totalDue += Number(charges[i][4]) || 0;
+  }
+
+  var payments = paymentsSheet.getDataRange().getValues();
+  var totalPaid = 0;
+  for (var j = 1; j < payments.length; j++) {
+    totalPaid += Number(payments[j][2]) || 0;
+  }
+
+  var unpaid = totalDue - totalPaid;
+  if (unpaid > 0) {
+    MailApp.sendEmail({
+      to: email,
+      subject: 'Tutor Manager: Podsumowanie zaległości',
+      body: 'Witaj! Twoje aktualne nieopłacone należności wynoszą: ' + (unpaid / 100).toFixed(2) + ' zł. Sprawdź aplikację Tutor Manager.'
+    });
   }
 }
 

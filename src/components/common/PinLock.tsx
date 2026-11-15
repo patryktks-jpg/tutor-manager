@@ -3,10 +3,9 @@ import { IconLock } from './Icons';
 
 interface PinLockProps {
   onUnlock: (pin: string) => Promise<boolean> | boolean;
-  biometricsAvailable?: boolean;
 }
 
-export const PinLock: React.FC<PinLockProps> = ({ onUnlock, biometricsAvailable = true }) => {
+export const PinLock: React.FC<PinLockProps> = ({ onUnlock }) => {
   const [pin, setPin] = useState('');
   const [error, setError] = useState(false);
 
@@ -30,11 +29,6 @@ export const PinLock: React.FC<PinLockProps> = ({ onUnlock, biometricsAvailable 
   const handleDelete = () => {
     setPin(prev => prev.slice(0, -1));
     setError(false);
-  };
-
-  const handleBiometricMock = () => {
-    // Spec mentions passkey / Face ID webauthn simulation
-    onUnlock('1234');
   };
 
   return (
@@ -125,23 +119,7 @@ export const PinLock: React.FC<PinLockProps> = ({ onUnlock, biometricsAvailable 
           </button>
         ))}
 
-        {biometricsAvailable ? (
-          <button
-            onClick={handleBiometricMock}
-            style={{
-              height: 72,
-              borderRadius: 36,
-              border: 'none',
-              backgroundColor: 'transparent',
-              color: 'var(--ios-blue)',
-              fontSize: 13,
-              fontWeight: 600,
-              cursor: 'pointer'
-            }}
-          >
-            Face ID
-          </button>
-        ) : <div />}
+        <div />
 
         <button
           onClick={() => handleDigit('0')}
