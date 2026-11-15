@@ -1,0 +1,253 @@
+:root {
+  --ios-system-bg: #F2F2F7;
+  --ios-card-bg: #FFFFFF;
+  --ios-grouped-bg: #FFFFFF;
+  --ios-text-primary: #000000;
+  --ios-text-secondary: #8E8E93;
+  --ios-text-tertiary: #C7C7CC;
+  --ios-border: #E5E5EA;
+  --ios-separator: rgba(60, 60, 67, 0.12);
+
+  --ios-blue: #007AFF;
+  --ios-green: #34C759;
+  --ios-amber: #FF9500;
+  --ios-red: #FF3B30;
+  --ios-purple: #AF52DE;
+  --ios-teal: #30B0C7;
+  --ios-indigo: #5856D6;
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  --tap-target-min: 44px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ios-system-bg: #000000;
+    --ios-card-bg: #1C1C1E;
+    --ios-grouped-bg: #2C2C2E;
+    --ios-text-primary: #FFFFFF;
+    --ios-text-secondary: #8E8E93;
+    --ios-text-tertiary: #48484A;
+    --ios-border: #38383A;
+    --ios-separator: rgba(84, 84, 88, 0.35);
+
+    --ios-blue: #0A84FF;
+    --ios-green: #30D158;
+    --ios-amber: #FF9F0A;
+    --ios-red: #FF453A;
+    --ios-purple: #BF5AF2;
+    --ios-teal: #64D2FF;
+    --ios-indigo: #5E5CE6;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", sans-serif;
+  background-color: var(--ios-system-bg);
+  color: var(--ios-text-primary);
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+  -webkit-user-select: none;
+  overflow-x: hidden;
+  padding-top: var(--safe-top);
+  padding-bottom: calc(var(--safe-bottom) + 72px);
+  padding-left: var(--safe-left);
+  padding-right: var(--safe-right);
+  font-size: 16px;
+}
+
+/* iOS Card */
+.ios-card {
+  background-color: var(--ios-card-bg);
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 14px;
+  border: 1px solid var(--ios-border);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+/* iOS Grouped List */
+.ios-list {
+  background-color: var(--ios-card-bg);
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid var(--ios-border);
+  margin-bottom: 16px;
+}
+
+.ios-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  min-height: var(--tap-target-min);
+  border-bottom: 1px solid var(--ios-separator);
+  font-size: 16px;
+}
+
+.ios-list-item:last-child {
+  border-bottom: none;
+}
+
+/* iOS Buttons */
+.ios-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--tap-target-min);
+  min-width: var(--tap-target-min);
+  padding: 10px 18px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 15px;
+  border: none;
+  cursor: pointer;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+}
+
+.ios-btn:active {
+  opacity: 0.7;
+  transform: scale(0.98);
+}
+
+.ios-btn-primary {
+  background-color: var(--ios-blue);
+  color: #FFFFFF;
+}
+
+.ios-btn-success {
+  background-color: var(--ios-green);
+  color: #FFFFFF;
+}
+
+.ios-btn-danger {
+  background-color: var(--ios-red);
+  color: #FFFFFF;
+}
+
+.ios-btn-secondary {
+  background-color: var(--ios-border);
+  color: var(--ios-text-primary);
+}
+
+/* iOS Badge */
+.ios-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 100px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.ios-badge-green {
+  background: rgba(52, 199, 89, 0.15);
+  color: var(--ios-green);
+}
+
+.ios-badge-amber {
+  background: rgba(255, 149, 0, 0.15);
+  color: var(--ios-amber);
+}
+
+.ios-badge-red {
+  background: rgba(255, 59, 48, 0.15);
+  color: var(--ios-red);
+}
+
+.ios-badge-blue {
+  background: rgba(0, 122, 255, 0.15);
+  color: var(--ios-blue);
+}
+
+/* iOS Modal / Bottom Sheet */
+.ios-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  z-index: 1000;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  animation: fadeIn 0.2s ease-out;
+}
+
+.ios-modal-content {
+  background-color: var(--ios-card-bg);
+  width: 100%;
+  max-width: 520px;
+  max-height: 90vh;
+  border-top-left-radius: 20px;
+  border-top-right-radius: 20px;
+  padding: 16px 20px calc(var(--safe-bottom) + 20px) 20px;
+  overflow-y: auto;
+  box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.2);
+  animation: slideUp 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ios-modal-grabber {
+  width: 36px;
+  height: 5px;
+  background-color: var(--ios-text-tertiary);
+  border-radius: 3px;
+  margin: 0 auto 16px auto;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+/* Form input */
+.ios-input {
+  width: 100%;
+  min-height: var(--tap-target-min);
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--ios-border);
+  background-color: var(--ios-system-bg);
+  color: var(--ios-text-primary);
+  font-size: 16px;
+  outline: none;
+  font-family: inherit;
+}
+
+.ios-input:focus {
+  border-color: var(--ios-blue);
+}
+
+/* Clean scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--ios-text-tertiary);
+  border-radius: 2px;
+}

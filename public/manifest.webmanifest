@@ -1,0 +1,36 @@
+{
+  "name": "Tutor Manager",
+  "short_name": "Tutor",
+  "description": "Prywatna aplikacja PWA dla korepetytora: grafik, uczniowie, finanse i limit działalności nierejestrowanej",
+  "start_url": "/#dzis",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F2F2F7",
+  "theme_color": "#007AFF",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "192x192 512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Plan na dziś",
+      "url": "/#dzis",
+      "description": "Dzisiejsze lekcje i limit"
+    },
+    {
+      "name": "Dodaj lekcję",
+      "url": "/#dodaj-lekcje",
+      "description": "Szybkie zaplanowanie lekcji"
+    },
+    {
+      "name": "Zarejestruj wpłatę",
+      "url": "/#dodaj-wplate",
+      "description": "Zaksięguj wpłatę BLIK / gotówka"
+    }
+  ]
+}
