@@ -175,6 +175,7 @@ export interface IncomeEntry {
   method: PaymentMethod;
   status: 'paid' | 'partial' | 'unpaid';
   period_id?: UUID;
+  lesson_id?: UUID;
   version: number;
   created_at: string;
   updated_at: string;

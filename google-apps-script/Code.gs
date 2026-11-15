@@ -67,7 +67,7 @@ function doGet(e) {
     if (action === 'pull') {
       var since = params.since || '1970-01-01T00:00:00Z';
       var data = fetchIncremental(since);
-      var serverTime = Utilities.formatDate(new Date(), 'Europe/Warsaw', "yyyy-MM-dd'T'HH:mm:ss'Z'");
+      var serverTime = Utilities.formatDate(new Date(), 'UTC', "yyyy-MM-dd'T'HH:mm:ss'Z'");
       return jsonResponse({ status: 'ok', data: data, server_time: serverTime });
     }
 
@@ -113,7 +113,7 @@ function doPost(e) {
         }
       }
 
-      var serverTime = Utilities.formatDate(new Date(), 'Europe/Warsaw', "yyyy-MM-dd'T'HH:mm:ss'Z'");
+      var serverTime = Utilities.formatDate(new Date(), 'UTC', "yyyy-MM-dd'T'HH:mm:ss'Z'");
       return jsonResponse({
         status: 'ok',
         processed: results.length,
@@ -280,8 +280,13 @@ function applySingleOperation(ss, op, sheetCache, processedOpsSet) {
 
   if (op.action === 'insert') {
     sheet.appendRow(rowValues);
-  } else if (op.action === 'update' && rowIndex > 0) {
-    sheet.getRange(rowIndex, 1, 1, headers.length).setValues([rowValues]);
+  } else if (op.action === 'update') {
+    if (rowIndex > 0) {
+      sheet.getRange(rowIndex, 1, 1, headers.length).setValues([rowValues]);
+    } else {
+      // Upsert (PUNKT 2 FIX): Rekord nie istnieje jeszcze w arkuszu (np. utworzony offline lub z demo), więc dopisujemy
+      sheet.appendRow(rowValues);
+    }
   } else if (op.action === 'delete' && rowIndex > 0) {
     sheet.deleteRow(rowIndex);
   }
@@ -358,7 +363,9 @@ function fetchIncremental(sinceIso) {
 }
 
 /**
- * Generowanie plików raportu PDF i XLSX na Dysku Google
+ * Generowanie plików raportu PDF i XLSX na Dysku Google.
+ * PUNKT 4 FIX (RODO): Tworzy odrębny, czysty skoroszyt zawierający WYŁĄCZNIE
+ * dane raportu – dane osobowe uczniów i opiekunów z innych zakładek nigdy nie trafiają do pliku!
  */
 function generateReportFiles(ss, periodId, reportData) {
   var folderName = 'TutorManager_Raporty';
@@ -368,33 +375,35 @@ function generateReportFiles(ss, periodId, reportData) {
   var periodLabel = reportData ? reportData.periodLabel : periodId;
   var fileName = 'Raport_' + periodLabel + '_' + Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyyMMdd_HHmm');
 
-  // Arkusz tymczasowy
-  var tempSheet = ss.insertSheet('Raport_' + Utilities.getUuid().slice(0, 6));
-  tempSheet.appendRow(['RAPORT DZIAŁALNOŚCI NIEREJESTROWANEJ: ' + periodLabel]);
-  tempSheet.appendRow(['Data wygenerowania:', Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyy-MM-dd HH:mm')]);
-  tempSheet.appendRow([]);
-  tempSheet.appendRow(['Wskaźnik', 'Wartość']);
-  tempSheet.appendRow(['Przychód należny (limit):', (reportData.accruedRevenueGrosze / 100).toFixed(2) + ' zł']);
-  tempSheet.appendRow(['Przychód otrzymany (PIT):', (reportData.receivedRevenueGrosze / 100).toFixed(2) + ' zł']);
-  tempSheet.appendRow(['Godziny zrealizowane:', reportData.hoursCompleted + ' h']);
-  tempSheet.appendRow(['Liczba zrealizowanych lekcji:', reportData.lessonsCompletedCount]);
-  tempSheet.appendRow(['Nieopłacone należności:', (reportData.unpaidGrosze / 100).toFixed(2) + ' zł']);
+  // Stwórz czysty, wyizolowany skoroszyt wyłącznie dla raportu
+  var isolatedSs = SpreadsheetApp.create(fileName);
+  var repSheet = isolatedSs.getActiveSheet();
+  repSheet.setName('Raport');
+
+  repSheet.appendRow(['TUTOR MANAGER – MIESIĘCZNY RAPORT EWIDENCJI']);
+  repSheet.appendRow(['Okres rozliczeniowy:', periodLabel]);
+  repSheet.appendRow(['Data wygenerowania:', Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyy-MM-dd HH:mm')]);
+  repSheet.appendRow([]);
+  repSheet.appendRow(['Wskaźnik', 'Wartość']);
+  repSheet.appendRow(['Przychód należny (limit działalności):', (reportData.accruedRevenueGrosze / 100).toFixed(2) + ' zł']);
+  repSheet.appendRow(['Przychód faktycznie otrzymany (PIT):', (reportData.receivedRevenueGrosze / 100).toFixed(2) + ' zł']);
+  repSheet.appendRow(['Godziny zrealizowane:', reportData.hoursCompleted + ' h']);
+  repSheet.appendRow(['Liczba zrealizowanych lekcji:', reportData.lessonsCompletedCount]);
+  repSheet.appendRow(['Nieopłacone należności uczniów:', (reportData.unpaidGrosze / 100).toFixed(2) + ' zł']);
 
   SpreadsheetApp.flush();
 
-  // 1. Eksport PDF
-  var pdfBlob = tempSheet.getAs('application/pdf').setName(fileName + '.pdf');
+  // Zapisz do folderu docelowego
+  var isolatedFile = DriveApp.getFileById(isolatedSs.getId());
+  targetFolder.addFile(isolatedFile);
+  DriveApp.getRootFolder().removeFile(isolatedFile);
+
+  var pdfBlob = isolatedFile.getAs('application/pdf').setName(fileName + '.pdf');
   var pdfFile = targetFolder.createFile(pdfBlob);
-
-  // 2. Eksport XLSX
-  var xlsxBlob = ss.getBlob().setName(fileName + '.xlsx');
-  var xlsxFile = targetFolder.createFile(xlsxBlob);
-
-  ss.deleteSheet(tempSheet);
 
   return {
     pdf_url: pdfFile.getUrl(),
-    xlsx_url: xlsxFile.getUrl(),
+    sheet_url: isolatedFile.getUrl(),
     folder_url: targetFolder.getUrl()
   };
 }
@@ -451,7 +460,10 @@ function createDailyBackup() {
 }
 
 /**
- * Cotygodniowy alert e-mail z limitem kwartalnym i zaległościami
+ * Cotygodniowy alert e-mail z limitem kwartalnym i zaległościami.
+ * PUNKT 3 FIX:
+ * - Filtruje przychody wyłącznie z BIEŻĄCEGO kwartału (accrual_date >= qStart && <= qEnd)
+ * - Pobiera limit dynamicznie z zakładki legal_params dla bieżącego roku zamiast sztywnej kwoty
  */
 function sendWeeklyTutorAlerts() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -460,29 +472,70 @@ function sendWeeklyTutorAlerts() {
 
   var chargesSheet = ss.getSheetByName('charges');
   var paymentsSheet = ss.getSheetByName('payments');
+  var legalParamsSheet = ss.getSheetByName('legal_params');
   if (!chargesSheet || !paymentsSheet) return;
 
+  var now = new Date();
+  var year = now.getFullYear();
+  var month = now.getMonth(); // 0-11
+  var quarter = Math.floor(month / 3) + 1; // 1, 2, 3, 4
+
+  var qStartMonth = (quarter - 1) * 3 + 1;
+  var qEndMonth = quarter * 3;
+  var qStartDate = year + '-' + (qStartMonth < 10 ? '0' : '') + qStartMonth + '-01';
+  var endDay = (quarter === 1 || quarter === 4) ? '31' : '30';
+  var qEndDate = year + '-' + (qEndMonth < 10 ? '0' : '') + qEndMonth + '-' + endDay;
+
+  // 1. Pobierz limit dynamicznie z legal_params
+  var limit = 1081350; // Domyślny fallback dla 2026 (10 813,50 zł)
+  if (legalParamsSheet) {
+    var lpData = legalParamsSheet.getDataRange().getValues();
+    for (var l = 1; l < lpData.length; l++) {
+      if (Number(lpData[l][1]) === year) {
+        var override = Number(lpData[l][7]);
+        var calcLimit = Number(lpData[l][6]);
+        limit = override > 0 ? override : (calcLimit > 0 ? calcLimit : limit);
+        break;
+      }
+    }
+  }
+
+  // 2. Sumuj należności z bieżącego kwartału oraz łączną sumę
   var charges = chargesSheet.getDataRange().getValues();
-  var totalAccrued = 0;
+  var totalQuarterAccrued = 0;
+  var totalAllCharges = 0;
+
   for (var i = 1; i < charges.length; i++) {
-    totalAccrued += Number(charges[i][4]) || 0;
+    var amt = Number(charges[i][4]) || 0;
+    var accDate = String(normalizeDateValue(charges[i][5])).slice(0, 10);
+    totalAllCharges += amt;
+    if (accDate >= qStartDate && accDate <= qEndDate) {
+      totalQuarterAccrued += amt;
+    }
   }
 
+  // 3. Sumuj wpłaty
   var payments = paymentsSheet.getDataRange().getValues();
-  var totalPaid = 0;
+  var totalAllPayments = 0;
   for (var j = 1; j < payments.length; j++) {
-    totalPaid += Number(payments[j][2]) || 0;
+    var pAmt = Number(payments[j][2]) || 0;
+    var pType = payments[j][6];
+    if (pType === 'zwrot') {
+      totalAllPayments -= pAmt;
+    } else {
+      totalAllPayments += pAmt;
+    }
   }
 
-  var unpaid = totalAccrued - totalPaid;
-  var limit = 1081350; // 10 813,50 zł
-  var pct = limit > 0 ? Math.round((totalAccrued / limit) * 100) : 0;
+  var totalUnpaid = Math.max(0, totalAllCharges - totalAllPayments);
+  var pct = limit > 0 ? Math.round((totalQuarterAccrued / limit) * 100) : 0;
 
-  var subject = 'Tutor Manager: Raport tygodniowy (Limit: ' + pct + '%)';
-  var body = 'Cześć!\n\nOto stan Twojej działalności nierejestrowanej:\n' +
-    '- Wykorzystanie limitu kwartalnego: ' + (totalAccrued / 100).toFixed(2) + ' zł / ' + (limit / 100).toFixed(2) + ' zł (' + pct + '%)\n' +
-    '- Nieopłacone lekcje uczniów: ' + (Math.max(0, unpaid) / 100).toFixed(2) + ' zł\n\n' +
-    (pct >= 95 ? 'UWAGA: Zbliżasz się do limitu działalności nierejestrowanej!\n' : '') +
+  var subject = 'Tutor Manager: Raport tygodniowy Q' + quarter + ' ' + year + ' (Limit: ' + pct + '%)';
+  var body = 'Cześć!\n\nOto stan Twojej działalności nierejestrowanej na dzień ' + Utilities.formatDate(now, 'Europe/Warsaw', 'yyyy-MM-dd') + ':\n' +
+    '- Przychód należny w kwartale (Q' + quarter + ' ' + year + '): ' + (totalQuarterAccrued / 100).toFixed(2) + ' zł / ' + (limit / 100).toFixed(2) + ' zł (' + pct + '%)\n' +
+    '- Pozostało do limitu kwartalnego: ' + (Math.max(0, limit - totalQuarterAccrued) / 100).toFixed(2) + ' zł\n' +
+    '- Łączne nieopłacone należności uczniów: ' + (totalUnpaid / 100).toFixed(2) + ' zł\n\n' +
+    (pct >= 95 ? 'UWAGA: Zbliżasz się do limitu działalności nierejestrowanej (95%+)! Po przekroczeniu masz 7 dni na wpis do CEIDG.\n\n' : '') +
     'Pozdrawiamy,\nTutor Manager';
 
   MailApp.sendEmail({ to: email, subject: subject, body: body });

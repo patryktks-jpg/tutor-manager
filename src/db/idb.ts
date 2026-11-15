@@ -242,6 +242,31 @@ export class IDBManager {
   }
 
   /**
+   * Commits multiple operations across different stores in a SINGLE atomic IDB transaction.
+   * If any write fails, all changes in the transaction are rolled back.
+   */
+  public static async batchCommit(
+    items: Array<{ store: string; action: 'put' | 'delete'; item?: any; key?: any }>
+  ): Promise<void> {
+    const db = await this.getDB();
+    const storeNames = Array.from(new Set(items.map(i => i.store)));
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(storeNames, 'readwrite');
+      for (const op of items) {
+        const s = tx.objectStore(op.store);
+        if (op.action === 'put') {
+          s.put(op.item);
+        } else if (op.action === 'delete') {
+          s.delete(op.key);
+        }
+      }
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(new Error('Batch IDB transaction aborted'));
+    });
+  }
+
+  /**
    * Records an offline operation to guarantee idempotency and sync upon reconnect.
    * Uses RFC4122 UUID.
    */

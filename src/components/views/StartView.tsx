@@ -443,17 +443,28 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                 </>
               )}
 
-              {selectedLesson.status === 'completed' && (
-                <button
-                  className="ios-btn ios-btn-success"
-                  onClick={() => {
-                    setShowActionModal(false);
-                    setShowPayModal(true);
-                  }}
-                >
-                  <IconCheck size={18} /> Zarejestruj wpłatę
-                </button>
-              )}
+              {selectedLesson.status === 'completed' && (() => {
+                const charge = charges.find(c => c.lesson_id === selectedLesson.id && c.amount > 0);
+                const isPaid = charge ? balanceMap.get(charge.id)?.status === 'paid' : false;
+                if (isPaid) {
+                  return (
+                    <div style={{ padding: '10px 12px', borderRadius: 10, background: 'rgba(52,199,89,0.15)', color: 'var(--ios-green)', fontWeight: 700, fontSize: 13, textAlign: 'center' }}>
+                      ✓ Lekcja jest w pełni opłacona
+                    </div>
+                  );
+                }
+                return (
+                  <button
+                    className="ios-btn ios-btn-success"
+                    onClick={() => {
+                      setShowActionModal(false);
+                      setShowPayModal(true);
+                    }}
+                  >
+                    <IconCheck size={18} /> Zarejestruj wpłatę
+                  </button>
+                );
+              })()}
 
               <button
                 className="ios-btn ios-btn-danger"

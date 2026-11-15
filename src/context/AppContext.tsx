@@ -28,6 +28,7 @@ import { calculateQuarterLimitStatus, LimitStatus } from '../domain/limit';
 import { proposeFifoAllocation } from '../domain/allocation';
 import { assessCancellation, DEFAULT_CANCEL_POLICY } from '../domain/cancelPolicy';
 import { buildMonthlyReport, createSnapshotRecord } from '../domain/periods';
+import { buildCompleteAndPayPayload } from '../domain/lessonOps';
 
 interface AppContextValue {
   isReady: boolean;
@@ -308,120 +309,80 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const dateToday = todayStr;
     const lessonDate = lesson.start_at.slice(0, 10);
     const year = Number(lessonDate.slice(0, 4));
+    const nextIncomeNum = getNextIncomeNumber(year);
 
-    // 1. Updated Lesson
-    const updatedLesson: Lesson = {
-      ...lesson,
-      status: 'completed',
-      version: lesson.status === 'completed' ? lesson.version : lesson.version + 1,
-      updated_at: nowIso
+    // Compute all entities via pure domain function
+    const payload = buildCompleteAndPayPayload(
+      lesson,
+      charges,
+      incomeEntries,
+      dateToday,
+      nextIncomeNum,
+      method,
+      nowIso
+    );
+
+    // Batch operations in a SINGLE multi-store atomic IndexedDB transaction
+    const dbOperations: Array<{ store: string; action: 'put' | 'delete'; item?: any; key?: any }> = [];
+    const newQueueOps: OfflineOperation[] = [];
+
+    const queueOp = (table: string, action: 'insert' | 'update' | 'delete', record: any) => {
+      const op: OfflineOperation = {
+        op_id: generateUUID(),
+        table,
+        action,
+        record,
+        timestamp: nowIso,
+        status: 'pending'
+      };
+      dbOperations.push({ store: 'offline_queue', action: 'put', item: op });
+      newQueueOps.push(op);
     };
 
-    // 2. Charge: use existing or create new
-    let chargeToUse = charges.find(c => c.lesson_id === lesson.id && c.amount > 0);
-    let newCharge: Charge | null = null;
-    if (!chargeToUse) {
-      newCharge = {
-        id: generateUUID(),
-        student_id: lesson.student_id,
-        lesson_id: lesson.id,
-        amount: lesson.price_snapshot,
-        accrual_date: lessonDate,
-        charge_type: 'lesson',
-        description: `Lekcja: ${lesson.subject}`,
-        version: 1,
-        created_at: nowIso,
-        updated_at: nowIso
-      };
-      chargeToUse = newCharge;
+    // 1. Lesson
+    dbOperations.push({ store: 'lessons', action: 'put', item: payload.updatedLesson });
+    queueOp('lessons', 'update', payload.updatedLesson);
+
+    // 2. Charge
+    if (payload.newCharge) {
+      dbOperations.push({ store: 'charges', action: 'put', item: payload.newCharge });
+      queueOp('charges', 'insert', payload.newCharge);
     }
 
     // 3. Payment
-    const newPayment: Payment = {
-      id: generateUUID(),
-      student_id: lesson.student_id,
-      amount: lesson.price_snapshot,
-      received_date: dateToday,
-      method,
-      description: `Płatność ${method.toUpperCase()} za lekcję z ${lessonDate}`,
-      payment_type: 'wplata',
-      version: 1,
-      created_at: nowIso,
-      updated_at: nowIso
-    };
+    dbOperations.push({ store: 'payments', action: 'put', item: payload.newPayment });
+    queueOp('payments', 'insert', payload.newPayment);
 
-    // 4. Payment Allocation (strictly allocated to chargeToUse.id)
-    const newAlloc: PaymentAllocation = {
-      id: generateUUID(),
-      payment_id: newPayment.id,
-      charge_id: chargeToUse.id,
-      amount: lesson.price_snapshot,
-      version: 1,
-      created_at: nowIso,
-      updated_at: nowIso
-    };
+    // 4. Payment Allocation
+    dbOperations.push({ store: 'payment_allocations', action: 'put', item: payload.newAllocation });
+    queueOp('payment_allocations', 'insert', payload.newAllocation);
 
-    // 5. Income Entry: create directly as 'paid' or update existing
-    const existingIncome = incomeEntries.find(e => e.service_date === lessonDate && e.student_id === lesson.student_id);
-    let newIncome: IncomeEntry | null = null;
-    let updatedIncome: IncomeEntry | null = null;
-
-    if (!existingIncome) {
-      const formattedNum = getNextIncomeNumber(year);
-      newIncome = {
-        id: generateUUID(),
-        number: formattedNum,
-        service_date: lessonDate,
-        accrual_date: lessonDate,
-        student_id: lesson.student_id,
-        service_type: lesson.subject || 'Lekcja matematyki',
-        amount_due: lesson.price_snapshot,
-        amount_received: lesson.price_snapshot,
-        received_date: dateToday,
-        method,
-        status: 'paid',
-        version: 1,
-        created_at: nowIso,
-        updated_at: nowIso
-      };
-    } else {
-      updatedIncome = {
-        ...existingIncome,
-        received_date: dateToday,
-        amount_received: lesson.price_snapshot,
-        method,
-        status: 'paid',
-        version: existingIncome.version + 1,
-        updated_at: nowIso
-      };
+    // 5. Income Entry
+    if (payload.newIncomeEntry) {
+      dbOperations.push({ store: 'income_entries', action: 'put', item: payload.newIncomeEntry });
+      queueOp('income_entries', 'insert', payload.newIncomeEntry);
+    } else if (payload.updatedIncomeEntry) {
+      dbOperations.push({ store: 'income_entries', action: 'put', item: payload.updatedIncomeEntry });
+      queueOp('income_entries', 'update', payload.updatedIncomeEntry);
     }
 
-    // Atomic persistence to IDB and offline queue
-    await commitChange('lessons', 'update', updatedLesson);
-    if (newCharge) {
-      await commitChange('charges', 'insert', newCharge);
-    }
-    await commitChange('payments', 'insert', newPayment);
-    await commitChange('payment_allocations', 'insert', newAlloc);
-    if (newIncome) {
-      await commitChange('income_entries', 'insert', newIncome);
-    } else if (updatedIncome) {
-      await commitChange('income_entries', 'update', updatedIncome);
-    }
+    // Atomic execution across all tables in IndexedDB
+    await IDBManager.batchCommit(dbOperations);
 
-    // Atomic React state updates
-    setLessons(prev => prev.map(l => l.id === lessonId ? updatedLesson : l));
-    if (newCharge) {
-      setCharges(prev => [...prev, newCharge!]);
+    // Atomic React state update
+    setLessons(prev => prev.map(l => l.id === lessonId ? payload.updatedLesson : l));
+    if (payload.newCharge) {
+      setCharges(prev => [...prev, payload.newCharge!]);
     }
-    setPayments(prev => [...prev, newPayment]);
-    setPaymentAllocations(prev => [...prev, newAlloc]);
-    if (newIncome) {
-      setIncomeEntries(prev => [...prev, newIncome!]);
-    } else if (updatedIncome) {
-      setIncomeEntries(prev => prev.map(e => e.id === updatedIncome!.id ? updatedIncome! : e));
+    setPayments(prev => [...prev, payload.newPayment]);
+    setPaymentAllocations(prev => [...prev, payload.newAllocation]);
+    if (payload.newIncomeEntry) {
+      setIncomeEntries(prev => [...prev, payload.newIncomeEntry!]);
+    } else if (payload.updatedIncomeEntry) {
+      setIncomeEntries(prev => prev.map(e => e.id === payload.updatedIncomeEntry!.id ? payload.updatedIncomeEntry! : e));
     }
-  }, [lessons, charges, incomeEntries, todayStr, assertNotClosedPeriod, commitChange, getNextIncomeNumber]);
+    setOfflineQueue(prev => [...prev, ...newQueueOps]);
+  }, [lessons, charges, incomeEntries, todayStr, assertNotClosedPeriod, getNextIncomeNumber]);
 
   /**
    * POINT 1 & 2 FIX:
@@ -469,7 +430,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // 3. Create IncomeEntry as 'unpaid' if not existing
-    const existingIncome = incomeEntries.find(e => e.service_date === lessonDate && e.student_id === lesson.student_id);
+    const existingIncome = incomeEntries.find(
+      e => (e.lesson_id && e.lesson_id === lesson.id) ||
+           (!e.lesson_id && e.service_date === lessonDate && e.student_id === lesson.student_id)
+    );
     if (!existingIncome) {
       const year = Number(lessonDate.slice(0, 4));
       const formattedNum = getNextIncomeNumber(year);
@@ -480,6 +444,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         service_date: lessonDate,
         accrual_date: lessonDate,
         student_id: lesson.student_id,
+        lesson_id: lesson.id,
         service_type: lesson.subject || 'Lekcja matematyki',
         amount_due: lesson.price_snapshot,
         amount_received: 0,
@@ -514,6 +479,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const targetCharge = charges.find(c => c.lesson_id === lesson.id && c.amount > 0);
 
+    // Ochrona przed zdublowaną wpłatą: jeśli należność jest już w pełni opłacona, nic nie rób
+    if (targetCharge) {
+      const existingAllocated = paymentAllocations
+        .filter(a => a.charge_id === targetCharge.id)
+        .reduce((sum, a) => sum + a.amount, 0);
+      if (existingAllocated >= targetCharge.amount) {
+        return;
+      }
+    }
+
     // Create Payment
     const newPayment: Payment = {
       id: generateUUID(),
@@ -546,10 +521,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     // Update income entry
-    const entry = incomeEntries.find(e => e.service_date === lessonDate && e.student_id === lesson.student_id);
+    const entry = incomeEntries.find(
+      e => (e.lesson_id && e.lesson_id === lesson.id) ||
+           (!e.lesson_id && e.service_date === lessonDate && e.student_id === lesson.student_id)
+    );
     if (entry) {
       const updatedEntry: IncomeEntry = {
         ...entry,
+        lesson_id: lesson.id,
         received_date: dateToday,
         amount_received: lesson.price_snapshot,
         method,
@@ -560,7 +539,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await commitChange('income_entries', 'update', updatedEntry);
       setIncomeEntries(prev => prev.map(e => e.id === entry.id ? updatedEntry : e));
     }
-  }, [lessons, charges, incomeEntries, todayStr, completeAndPayLesson, commitChange]);
+  }, [lessons, charges, paymentAllocations, incomeEntries, todayStr, completeAndPayLesson, commitChange]);
 
   const updateLessonStatus = useCallback(async (lessonId: UUID, status: Lesson['status'], note?: string) => {
     const lesson = lessons.find(l => l.id === lessonId);

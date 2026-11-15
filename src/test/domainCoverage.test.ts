@@ -5,6 +5,7 @@ import { getStudentFinancialSummary } from '../domain/allocation';
 import { generateUUID, hashPin } from '../domain/crypto';
 import { getWarsawDateStr, getWarsawDateTimeStr, getWarsawWeekRange } from '../domain/dateUtils';
 import { findLessonConflicts, generateSeriesOccurrences } from '../domain/series';
+import { buildCompleteAndPayPayload } from '../domain/lessonOps';
 import { calculateLimitGrosze, calculateQuarterLimitStatus } from '../domain/limit';
 import { calculateAccrualDate } from '../domain/accrual';
 import { createSnapshotRecord } from '../domain/periods';
@@ -204,8 +205,7 @@ describe('Domain Full Coverage Suite (≥ 90%)', () => {
     expect(octEndRes.sundayStr).toBe('2026-11-01');
   });
 
-  it('guarantees complete-and-pay atomic invariants (PUNKT 1 & 2 FIX)', () => {
-    // Simulate what completeAndPayLesson does atomically
+  it('guarantees complete-and-pay atomic invariants via buildCompleteAndPayPayload', () => {
     const lesson: Lesson = {
       id: 'l-atomic-1',
       student_id: 's-atomic',
@@ -222,75 +222,84 @@ describe('Domain Full Coverage Suite (≥ 90%)', () => {
     };
 
     const dateToday = '2026-11-16';
-    const lessonDate = lesson.start_at.slice(0, 10);
 
-    // 1. Lesson updated
-    const updatedLesson = { ...lesson, status: 'completed' as const, version: lesson.version + 1 };
+    // 1. Initial complete and pay from planned state
+    const payload1 = buildCompleteAndPayPayload(lesson, [], [], dateToday, '2026/001', 'blik');
 
-    // 2. Exactly one charge created
-    const charge = {
-      id: generateUUID(),
-      student_id: lesson.student_id,
-      lesson_id: lesson.id,
-      amount: lesson.price_snapshot,
-      accrual_date: lessonDate,
-      charge_type: 'lesson' as const,
-      description: `Lekcja: ${lesson.subject}`,
+    expect(payload1.updatedLesson.status).toBe('completed');
+    expect(payload1.updatedLesson.version).toBe(2);
+
+    expect(payload1.newCharge).not.toBeNull();
+    expect(payload1.newCharge!.amount).toBe(7000);
+    expect(payload1.newCharge!.accrual_date).toBe('2026-11-16');
+    expect(payload1.newCharge!.lesson_id).toBe(lesson.id);
+
+    expect(payload1.newPayment.amount).toBe(7000);
+    expect(payload1.newPayment.method).toBe('blik');
+    expect(payload1.newPayment.student_id).toBe('s-atomic');
+
+    expect(payload1.newAllocation.payment_id).toBe(payload1.newPayment.id);
+    expect(payload1.newAllocation.charge_id).toBe(payload1.newCharge!.id);
+    expect(payload1.newAllocation.amount).toBe(7000);
+
+    expect(payload1.newIncomeEntry).not.toBeNull();
+    expect(payload1.newIncomeEntry!.status).toBe('paid');
+    expect(payload1.newIncomeEntry!.amount_received).toBe(7000);
+    expect(payload1.newIncomeEntry!.amount_due).toBe(7000);
+    expect(payload1.newIncomeEntry!.lesson_id).toBe(lesson.id);
+    expect(payload1.newIncomeEntry!.number).toBe('2026/001');
+
+    // 2. Idempotency test: calling on already completed/charged lesson
+    const existingCharges = [payload1.newCharge!];
+    const existingIncomes = [payload1.newIncomeEntry!];
+
+    const payload2 = buildCompleteAndPayPayload(
+      payload1.updatedLesson,
+      existingCharges,
+      existingIncomes,
+      dateToday,
+      '2026/002',
+      'blik'
+    );
+
+    // Should NOT create duplicate charge
+    expect(payload2.newCharge).toBeNull();
+    expect(payload2.targetChargeId).toBe(payload1.newCharge!.id);
+    expect(payload2.newAllocation.charge_id).toBe(payload1.newCharge!.id);
+
+    // 3. Two lessons for the SAME student on the SAME day
+    const lesson2: Lesson = {
+      id: 'l-atomic-2',
+      student_id: 's-atomic',
+      start_at: '2026-11-16T19:00:00',
+      duration_min: 60,
+      status: 'planned',
+      price_snapshot: 8000,
+      subject: 'Fizyka',
+      location: 'student_home',
+      notes: '',
       version: 1,
-      created_at: '2026-11-16T18:00:00',
-      updated_at: '2026-11-16T18:00:00'
+      created_at: '2026-11-16T10:00:00',
+      updated_at: '2026-11-16T10:00:00'
     };
 
-    // 3. Exactly one payment created
-    const payment = {
-      id: generateUUID(),
-      student_id: lesson.student_id,
-      amount: lesson.price_snapshot,
-      received_date: dateToday,
-      method: 'blik' as const,
-      description: 'Płatność BLIK',
-      payment_type: 'wplata' as const,
-      version: 1,
-      created_at: '2026-11-16T18:00:00',
-      updated_at: '2026-11-16T18:00:00'
-    };
+    const payloadSameDay = buildCompleteAndPayPayload(
+      lesson2,
+      existingCharges,
+      existingIncomes,
+      dateToday,
+      '2026/002',
+      'blik'
+    );
 
-    // 4. Exactly one allocation strictly linking payment to the charge
-    const allocation = {
-      id: generateUUID(),
-      payment_id: payment.id,
-      charge_id: charge.id,
-      amount: lesson.price_snapshot,
-      version: 1,
-      created_at: '2026-11-16T18:00:00',
-      updated_at: '2026-11-16T18:00:00'
-    };
+    // Distinct charge, distinct allocation, distinct income entry with lesson_id
+    expect(payloadSameDay.newCharge).not.toBeNull();
+    expect(payloadSameDay.newCharge!.amount).toBe(8000);
+    expect(payloadSameDay.newCharge!.lesson_id).toBe(lesson2.id);
 
-    // 5. Exactly one income entry created directly as paid
-    const incomeEntry = {
-      id: generateUUID(),
-      number: '2026/001',
-      service_date: lessonDate,
-      accrual_date: lessonDate,
-      student_id: lesson.student_id,
-      service_type: lesson.subject,
-      amount_due: lesson.price_snapshot,
-      amount_received: lesson.price_snapshot,
-      received_date: dateToday,
-      method: 'blik' as const,
-      status: 'paid' as const,
-      version: 1,
-      created_at: '2026-11-16T18:00:00',
-      updated_at: '2026-11-16T18:00:00'
-    };
-
-    expect(updatedLesson.status).toBe('completed');
-    expect(charge.amount).toBe(7000);
-    expect(payment.amount).toBe(7000);
-    expect(allocation.charge_id).toBe(charge.id);
-    expect(allocation.payment_id).toBe(payment.id);
-    expect(allocation.amount).toBe(charge.amount);
-    expect(incomeEntry.status).toBe('paid');
-    expect(incomeEntry.amount_received).toBe(charge.amount);
+    expect(payloadSameDay.newIncomeEntry).not.toBeNull();
+    expect(payloadSameDay.newIncomeEntry!.lesson_id).toBe(lesson2.id);
+    expect(payloadSameDay.newIncomeEntry!.amount_due).toBe(8000);
+    expect(payloadSameDay.newIncomeEntry!.number).toBe('2026/002');
   });
 });

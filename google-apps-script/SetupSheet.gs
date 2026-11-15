@@ -53,7 +53,7 @@ function initializeAllSheets() {
     income_entries: [
       'id', 'number', 'service_date', 'accrual_date', 'received_date', 'student_id',
       'service_type', 'amount_due', 'amount_received', 'method', 'status',
-      'period_id', 'version', 'created_at', 'updated_at'
+      'period_id', 'lesson_id', 'version', 'created_at', 'updated_at'
     ],
     legal_params: [
       'id', 'year', 'min_wage', 'factor_pct', 'frequency', 'valid_from',
