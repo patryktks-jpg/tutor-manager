@@ -4,11 +4,12 @@ import { App } from './App';
 import { AppProvider } from './context/AppContext';
 import './index.css';
 
-// Register Service Worker for PWA offline caching
-if ('serviceWorker' in navigator) {
+// Register Service Worker with relative path for GitHub Pages compatibility
+if ('serviceWorker' in navigator && window.location.protocol.startsWith('http')) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(err => {
-      console.warn('Service worker registration failed:', err);
+    const swUrl = new URL('sw.js', window.location.href).href;
+    navigator.serviceWorker.register(swUrl).catch(err => {
+      console.warn('Service worker registration note:', err);
     });
   });
 }

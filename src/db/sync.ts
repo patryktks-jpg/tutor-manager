@@ -50,13 +50,14 @@ export async function syncWithGas(
 
   let pushedCount = 0;
 
-  // Push pending operations
+  // 1. Push pending operations
   if (queue.length > 0) {
     onProgress?.(`Wysyłanie ${queue.length} operacji do Arkusza Google...`);
     try {
+      // Point 5 Fix: Use text/plain to avoid preflight CORS OPTIONS request in Google Apps Script!
       const pushRes = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify({
           action: 'push_batch',
           token,
@@ -76,22 +77,23 @@ export async function syncWithGas(
           success: false,
           pushedCount: 0,
           pulledCount: 0,
-          message: 'Błąd podczas synchronizacji zapisu w Apps Script',
+          message: 'Błąd podczas synchronizacji zapisu w Apps Script: ' + (pushJson.message || 'Nieznany błąd'),
           error: pushJson.message
         };
       }
     } catch (err: any) {
+      // Point 7 Fix: DO NOT update last_sync_at on error
       return {
         success: false,
         pushedCount: 0,
         pulledCount: 0,
-        message: 'Brak połączenia z siecią. Zmiany pozostają w kolejce offline.',
+        message: 'Brak połączenia z siecią. Zmiany pozostają bezpiecznie w kolejce offline.',
         error: err.message
       };
     }
   }
 
-  // Pull incremental updates
+  // 2. Pull incremental updates
   let pulledCount = 0;
   try {
     onProgress?.('Pobieranie przyrostowych zmian z Arkusza Google...');
@@ -111,17 +113,30 @@ export async function syncWithGas(
           }
         }
       }
+
+      // Point 7 Fix: Update last_sync_at ONLY on successful fetch!
+      const nowIso = new Date().toISOString();
+      await IDBManager.put('settings', {
+        ...settings,
+        last_sync_at: nowIso
+      });
+    } else {
+      return {
+        success: false,
+        pushedCount,
+        pulledCount: 0,
+        message: 'Błąd pobierania danych: ' + (pullJson.message || 'Niepowodzenie')
+      };
     }
   } catch (err: any) {
-    // Non-fatal if push worked or if offline
-    console.warn('Sync pull warning:', err);
+    return {
+      success: false,
+      pushedCount,
+      pulledCount: 0,
+      message: 'Błąd podczas pobierania aktualizacji z Arkusza Google.',
+      error: err.message
+    };
   }
-
-  const nowIso = new Date().toISOString();
-  await IDBManager.put('settings', {
-    ...settings,
-    last_sync_at: nowIso
-  });
 
   return {
     success: true,

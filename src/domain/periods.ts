@@ -1,4 +1,6 @@
-import { Charge, Lesson, Payment, PaymentAllocation, Period, ReportSnapshot, Student, UUID } from './types';
+import { Charge, Lesson, Payment, PaymentAllocation, Period, ReportSnapshot, Student, UUID, LegalParams } from './types';
+import { getChargesBalance } from './allocation';
+import { calculateQuarterLimitStatus } from './limit';
 
 export interface MonthlyReportData {
   periodId: UUID;
@@ -11,9 +13,9 @@ export interface MonthlyReportData {
   hoursCancelled: number;
   lessonsCompletedCount: number;
   lessonsCancelledCount: number;
-  accruedRevenueGrosze: number; // przychód należny
-  receivedRevenueGrosze: number; // przychód otrzymany
-  unpaidGrosze: number;
+  accruedRevenueGrosze: number; // przychód należny w miesiącu
+  receivedRevenueGrosze: number; // przychód otrzymany w miesiącu (PIT)
+  unpaidGrosze: number; // nieopłacone należności z tego miesiąca
   paymentsByMethod: {
     blik: number;
     przelew: number;
@@ -37,10 +39,9 @@ export function buildMonthlyReport(
   lessons: Lesson[],
   charges: Charge[],
   payments: Payment[],
-  _allocations: PaymentAllocation[],
+  allocations: PaymentAllocation[],
   students: Student[],
-  quarterLimitGrosze: number,
-  quarterCumulativeChargesGrosze: number
+  legalParamsList: LegalParams[]
 ): MonthlyReportData {
   const from = period.date_from;
   const to = period.date_to;
@@ -73,6 +74,16 @@ export function buildMonthlyReport(
   const accruedRevenueGrosze = periodCharges.reduce((sum, c) => sum + c.amount, 0);
   const receivedRevenueGrosze = periodPayments.reduce((sum, p) => p.payment_type === 'wplata' ? sum + p.amount : sum - p.amount, 0);
 
+  // Exact unpaid calculation: sum of remaining unpaid balances of charges accrued in this period
+  const balanceMap = getChargesBalance(charges, allocations);
+  let unpaidGrosze = 0;
+  for (const c of periodCharges) {
+    const b = balanceMap.get(c.id);
+    if (b && b.remainingAmount > 0) {
+      unpaidGrosze += b.remainingAmount;
+    }
+  }
+
   const paymentsByMethod = {
     blik: 0,
     przelew: 0,
@@ -87,9 +98,6 @@ export function buildMonthlyReport(
   }
 
   // Breakdown per student
-  const studentMap = new Map<UUID, Student>();
-  for (const s of students) studentMap.set(s.id, s);
-
   const studentBreakdown = students.map(s => {
     const sCharges = periodCharges.filter(c => c.student_id === s.id);
     const sPayments = periodPayments.filter(p => p.student_id === s.id);
@@ -98,7 +106,14 @@ export function buildMonthlyReport(
     const sMinutes = sLessons.reduce((sum, l) => sum + l.duration_min, 0);
     const sAccrued = sCharges.reduce((sum, c) => sum + c.amount, 0);
     const sReceived = sPayments.reduce((sum, p) => p.payment_type === 'wplata' ? sum + p.amount : sum - p.amount, 0);
-    const sUnpaid = Math.max(0, sAccrued - sReceived);
+
+    let sUnpaid = 0;
+    for (const c of sCharges) {
+      const b = balanceMap.get(c.id);
+      if (b && b.remainingAmount > 0) {
+        sUnpaid += b.remainingAmount;
+      }
+    }
 
     return {
       studentId: s.id,
@@ -109,6 +124,23 @@ export function buildMonthlyReport(
       unpaidGrosze: sUnpaid
     };
   }).filter(b => b.completedHours > 0 || b.accruedGrosze > 0 || b.receivedGrosze > 0);
+
+  // Calculate quarter limit for the QUARTER OF THIS REPORT PERIOD, not today's quarter!
+  const periodYear = Number(from.slice(0, 4));
+  const legalParam = legalParamsList.find(lp => lp.year === periodYear) || legalParamsList[0] || {
+    id: 'default',
+    year: periodYear,
+    min_wage: 480600,
+    factor_pct: 225,
+    frequency: 'quarter' as const,
+    valid_from: `${periodYear}-01-01`,
+    calculated_limit: 1081350,
+    version: 1,
+    created_at: '',
+    updated_at: ''
+  };
+
+  const quarterLimitStatus = calculateQuarterLimitStatus(from, charges, legalParam, []);
 
   return {
     periodId: period.id,
@@ -123,11 +155,11 @@ export function buildMonthlyReport(
     lessonsCancelledCount,
     accruedRevenueGrosze,
     receivedRevenueGrosze,
-    unpaidGrosze: Math.max(0, accruedRevenueGrosze - receivedRevenueGrosze),
+    unpaidGrosze,
     paymentsByMethod,
     studentBreakdown,
-    quarterLimitProgressGrosze: quarterCumulativeChargesGrosze,
-    quarterLimitMaxGrosze: quarterLimitGrosze
+    quarterLimitProgressGrosze: quarterLimitStatus.usedGrosze,
+    quarterLimitMaxGrosze: quarterLimitStatus.limitGrosze
   };
 }
 

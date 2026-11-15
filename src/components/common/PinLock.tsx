@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { IconLock } from './Icons';
 
 interface PinLockProps {
-  onUnlock: (pin: string) => boolean;
+  onUnlock: (pin: string) => Promise<boolean> | boolean;
   biometricsAvailable?: boolean;
 }
 
@@ -10,12 +10,12 @@ export const PinLock: React.FC<PinLockProps> = ({ onUnlock, biometricsAvailable 
   const [pin, setPin] = useState('');
   const [error, setError] = useState(false);
 
-  const handleDigit = (digit: string) => {
+  const handleDigit = async (digit: string) => {
     if (pin.length < 4) {
       const nextPin = pin + digit;
       setPin(nextPin);
       if (nextPin.length === 4) {
-        const success = onUnlock(nextPin);
+        const success = await onUnlock(nextPin);
         if (!success) {
           setError(true);
           setTimeout(() => {

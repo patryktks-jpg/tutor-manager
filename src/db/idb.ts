@@ -18,6 +18,7 @@ import {
   OfflineOperation,
   UUID
 } from '../domain/types';
+import { generateUUID } from '../domain/crypto';
 import {
   INITIAL_STUDENTS,
   INITIAL_GUARDIANS,
@@ -107,11 +108,11 @@ export class IDBManager {
 
   public static async loadInitialState(): Promise<AppDatabaseSchema> {
     const db = await this.getDB();
-    const students = await this.getAll<Student>(db, 'students');
+    const legalParams = await this.getAll<LegalParams>(db, 'legal_params');
 
-    // Check if initial population needed
-    if (students.length === 0) {
-      await this.seedDefaults(db);
+    // Only seed initial legal params and settings if completely fresh
+    if (legalParams.length === 0) {
+      await this.seedMinimal(db);
     }
 
     const state: AppDatabaseSchema = {
@@ -137,7 +138,21 @@ export class IDBManager {
     return state;
   }
 
-  public static async seedDefaults(db: IDBDatabase): Promise<void> {
+  public static async seedMinimal(db: IDBDatabase): Promise<void> {
+    const tx = db.transaction(['legal_params', 'periods', 'settings'], 'readwrite');
+    tx.objectStore('legal_params').put(INITIAL_LEGAL_PARAMS_2026);
+    for (const p of INITIAL_PERIODS) {
+      tx.objectStore('periods').put(p);
+    }
+    tx.objectStore('settings').put(INITIAL_SETTINGS);
+
+    await new Promise((res, rej) => {
+      tx.oncomplete = () => res(true);
+      tx.onerror = () => rej(tx.error);
+    });
+  }
+
+  public static async seedDemoData(db: IDBDatabase): Promise<void> {
     const tx = db.transaction([
       'students', 'guardians', 'rate_history', 'lesson_series', 'lessons',
       'charges', 'payments', 'payment_allocations', 'income_entries',
@@ -166,6 +181,19 @@ export class IDBManager {
       tx.oncomplete = () => res(true);
       tx.onerror = () => rej(tx.error);
     });
+  }
+
+  public static async clearAllUserData(): Promise<void> {
+    const db = await this.getDB();
+    const stores = [
+      'students', 'guardians', 'rate_history', 'lesson_series', 'lessons',
+      'lesson_events', 'charges', 'payments', 'payment_allocations', 'packages',
+      'income_entries', 'report_snapshots', 'audit_logs', 'offline_queue'
+    ];
+    for (const s of stores) {
+      const tx = db.transaction(s, 'readwrite');
+      tx.objectStore(s).clear();
+    }
   }
 
   public static async getAll<T>(db: IDBDatabase, storeName: string): Promise<T[]> {
@@ -212,6 +240,7 @@ export class IDBManager {
 
   /**
    * Records an offline operation to guarantee idempotency and sync upon reconnect.
+   * Uses RFC4122 UUID.
    */
   public static async queueOperation(
     table: string,
@@ -219,7 +248,7 @@ export class IDBManager {
     record: any
   ): Promise<OfflineOperation> {
     const op: OfflineOperation = {
-      op_id: `op-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+      op_id: generateUUID(),
       table,
       action,
       record,
@@ -235,17 +264,11 @@ export class IDBManager {
     await this.delete('offline_queue', opId);
   }
 
-  /**
-   * Complete database export to JSON
-   */
   public static async exportBackupJSON(): Promise<string> {
     const state = await this.loadInitialState();
     return JSON.stringify(state, null, 2);
   }
 
-  /**
-   * Restore database from JSON
-   */
   public static async restoreFromJSON(jsonStr: string): Promise<void> {
     const data = JSON.parse(jsonStr) as Partial<AppDatabaseSchema>;
     const db = await this.getDB();

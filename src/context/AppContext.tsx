@@ -20,6 +20,7 @@ import {
   UUID,
   PaymentMethod
 } from '../domain/types';
+import { generateUUID, hashPin } from '../domain/crypto';
 import { IDBManager } from '../db/idb';
 import { syncWithGas, testGasConnection, SyncResult } from '../db/sync';
 import { calculateQuarterLimitStatus, LimitStatus } from '../domain/limit';
@@ -30,8 +31,9 @@ import { buildMonthlyReport, createSnapshotRecord } from '../domain/periods';
 interface AppContextValue {
   isReady: boolean;
   isLocked: boolean;
-  unlockWithPin: (pin: string) => boolean;
+  unlockWithPin: (pin: string) => Promise<boolean>;
   lockApp: () => void;
+  setAppPin: (pin: string) => Promise<void>;
 
   // Domain data
   students: Student[];
@@ -51,14 +53,16 @@ interface AppContextValue {
   settings: Settings;
   offlineQueue: OfflineOperation[];
 
-  // Computed financial status
+  // Dynamic computed properties
+  todayStr: string;
   activeLegalParam: LegalParams;
   limitStatus: LimitStatus;
   unconfirmedLessons: Lesson[];
   offlineQueueCount: number;
 
-  // Operations
-  quickCompleteLessonAndPay: (lessonId: UUID, method?: PaymentMethod) => Promise<void>;
+  // Domain Operations
+  markLessonCompleted: (lessonId: UUID) => Promise<void>;
+  recordLessonPayment: (lessonId: UUID, method?: PaymentMethod) => Promise<void>;
   updateLessonStatus: (lessonId: UUID, status: Lesson['status'], note?: string) => Promise<void>;
   rescheduleLesson: (lessonId: UUID, newStartIso: string) => Promise<void>;
   createLesson: (lessonData: Partial<Lesson>) => Promise<Lesson>;
@@ -72,13 +76,14 @@ interface AppContextValue {
   updateSettings: (newSettings: Partial<Settings>) => Promise<void>;
   acceptLegalDeclaration: () => Promise<void>;
 
-  // Sync & Backup
+  // Sync & Data management
   syncStatus: { isSyncing: boolean; message: string; lastResult?: SyncResult };
   syncNow: () => Promise<SyncResult>;
   testConnection: (url: string, token: string) => Promise<{ success: boolean; message: string }>;
   exportBackup: () => Promise<string>;
   restoreBackup: (jsonStr: string) => Promise<void>;
-  resetToSampleData: () => Promise<void>;
+  clearUserData: () => Promise<void>;
+  loadDemoData: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -86,6 +91,12 @@ const AppContext = createContext<AppContextValue | null>(null);
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isReady, setIsReady] = useState(false);
   const [isLocked, setIsLocked] = useState(false);
+
+  // Dynamic date state that refreshes when app gains focus or periodically
+  const [todayStr, setTodayStr] = useState(() => {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  });
 
   const [students, setStudents] = useState<Student[]>([]);
   const [guardians, setGuardians] = useState<Guardian[]>([]);
@@ -110,7 +121,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     message: ''
   });
 
-  // Load from IndexedDB on startup (< 1 sec)
+  // Keep today's date fresh even when iPhone Safari wakes from background
+  useEffect(() => {
+    const updateDate = () => {
+      const d = new Date();
+      const current = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      setTodayStr(current);
+    };
+
+    window.addEventListener('visibilitychange', updateDate);
+    window.addEventListener('focus', updateDate);
+    const interval = setInterval(updateDate, 60000); // check every minute
+
+    return () => {
+      window.removeEventListener('visibilitychange', updateDate);
+      window.removeEventListener('focus', updateDate);
+      clearInterval(interval);
+    };
+  }, []);
+
   const refreshFromIDB = useCallback(async () => {
     const data = await IDBManager.loadInitialState();
     setStudents(data.students);
@@ -141,7 +170,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     refreshFromIDB();
   }, [refreshFromIDB]);
 
-  // Inactivity auto-lock timer
+  // Inactivity auto-lock
   useEffect(() => {
     if (!settings.pin_enabled || !settings.auto_lock_min || isLocked) return;
 
@@ -167,19 +196,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [settings.pin_enabled, settings.auto_lock_min, isLocked]);
 
-  const unlockWithPin = useCallback((pin: string): boolean => {
-    if (settings.pin_hash === pin) {
+  const unlockWithPin = useCallback(async (pin: string): Promise<boolean> => {
+    if (!settings.pin_hash) {
+      setIsLocked(false);
+      return true;
+    }
+    const enteredHash = await hashPin(pin);
+    if (settings.pin_hash === enteredHash || settings.pin_hash === pin) {
       setIsLocked(false);
       return true;
     }
     return false;
   }, [settings.pin_hash]);
 
+  const setAppPin = useCallback(async (pin: string) => {
+    const hashed = await hashPin(pin);
+    await updateSettings({ pin_hash: hashed, pin_enabled: true });
+  }, []);
+
   const lockApp = useCallback(() => {
     if (settings.pin_enabled) setIsLocked(true);
   }, [settings.pin_enabled]);
 
-  // Helper to persist change locally and queue for sync
   const commitChange = useCallback(async (table: string, action: 'insert' | 'update' | 'delete', record: any) => {
     if (action === 'delete') {
       await IDBManager.delete(table, record.id || record);
@@ -192,26 +230,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setOfflineQueue(q);
   }, []);
 
+  // Helper to assert whether a date falls in a closed period
+  const assertNotClosedPeriod = useCallback((dateStr: string) => {
+    const d = dateStr.slice(0, 10);
+    for (const p of periods) {
+      if (p.status === 'closed' && d >= p.date_from && d <= p.date_to) {
+        throw new Error(`Data ${d} należy do zamkniętego okresu (${p.date_from} do ${p.date_to}). Zmiana jest zablokowana.`);
+      }
+    }
+  }, [periods]);
+
+  // Dynamic selection of legal params for the current year (Point 3 fix)
+  const currentYear = useMemo(() => Number(todayStr.slice(0, 4)), [todayStr]);
   const activeLegalParam = useMemo(() => {
-    return legalParams.find(p => p.year === 2026) || legalParams[0] || {
+    return legalParams.find(p => p.year === currentYear) || legalParams[0] || {
       id: 'default',
-      year: 2026,
+      year: currentYear,
       min_wage: 480600,
       factor_pct: 225,
       frequency: 'quarter',
-      valid_from: '2026-01-01',
+      valid_from: `${currentYear}-01-01`,
       calculated_limit: 1081350,
       version: 1,
       created_at: '',
       updated_at: ''
     };
-  }, [legalParams]);
-
-  // Today reference date: default to today's date in Poland
-  const todayStr = useMemo(() => {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }, []);
+  }, [legalParams, currentYear]);
 
   const limitStatus = useMemo(() => {
     return calculateQuarterLimitStatus(
@@ -231,15 +275,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [lessons, todayStr]);
 
   /**
-   * SPEC A1: "Jedno kliknięcie po lekcji („zrealizowana + zapłacona BLIK-iem”)
-   * aktualizuje grafik, saldo ucznia, ewidencję i pasek limitu. Użytkownik nie liczy nic ręcznie."
+   * Generates next strictly sequential income number RRRR/NNN (Point 4 fix)
    */
-  const quickCompleteLessonAndPay = useCallback(async (lessonId: UUID, method: PaymentMethod = 'blik') => {
+  const getNextIncomeNumber = useCallback((year: number) => {
+    const prefix = `${year}/`;
+    const numbers = incomeEntries
+      .filter(e => e.number.startsWith(prefix))
+      .map(e => parseInt(e.number.split('/')[1], 10))
+      .filter(n => !isNaN(n));
+
+    const nextVal = (numbers.length > 0 ? Math.max(...numbers) : 0) + 1;
+    return `${year}/${String(nextVal).padStart(3, '0')}`;
+  }, [incomeEntries]);
+
+  /**
+   * POINT 1 & 2 FIX:
+   * Marking a lesson as 'completed' (from start swipe, calendar, or modal)
+   * GUARANTEES that a Charge and an IncomeEntry (unpaid) are created!
+   * Payment is NOT automatically recorded unless explicitly requested.
+   */
+  const markLessonCompleted = useCallback(async (lessonId: UUID) => {
     const lesson = lessons.find(l => l.id === lessonId);
     if (!lesson) return;
 
+    assertNotClosedPeriod(lesson.start_at);
+
     const nowIso = new Date().toISOString();
-    const dateToday = todayStr;
     const lessonDate = lesson.start_at.slice(0, 10);
 
     // 1. Update lesson status
@@ -252,30 +313,79 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await commitChange('lessons', 'update', updatedLesson);
     setLessons(prev => prev.map(l => l.id === lessonId ? updatedLesson : l));
 
-    // 2. Create Charge (accrual_date = lesson date as per Chapter 4.2)
-    const newCharge: Charge = {
-      id: `ch-${Date.now()}`,
-      student_id: lesson.student_id,
-      lesson_id: lesson.id,
-      amount: lesson.price_snapshot,
-      accrual_date: lessonDate,
-      charge_type: 'lesson',
-      description: `Lekcja: ${lesson.subject}`,
-      version: 1,
-      created_at: nowIso,
-      updated_at: nowIso
-    };
-    await commitChange('charges', 'insert', newCharge);
-    setCharges(prev => [...prev, newCharge]);
+    // 2. Create Charge if not already existing
+    const existingCharge = charges.find(c => c.lesson_id === lesson.id && c.amount > 0);
 
-    // 3. Create Payment
+    if (!existingCharge) {
+      const newCharge: Charge = {
+        id: generateUUID(),
+        student_id: lesson.student_id,
+        lesson_id: lesson.id,
+        amount: lesson.price_snapshot,
+        accrual_date: lessonDate,
+        charge_type: 'lesson',
+        description: `Lekcja: ${lesson.subject}`,
+        version: 1,
+        created_at: nowIso,
+        updated_at: nowIso
+      };
+      await commitChange('charges', 'insert', newCharge);
+      setCharges(prev => [...prev, newCharge]);
+    }
+
+    // 3. Create IncomeEntry as 'unpaid' if not existing
+    const existingIncome = incomeEntries.find(e => e.service_date === lessonDate && e.student_id === lesson.student_id);
+    if (!existingIncome) {
+      const year = Number(lessonDate.slice(0, 4));
+      const formattedNum = getNextIncomeNumber(year);
+
+      const newIncome: IncomeEntry = {
+        id: generateUUID(),
+        number: formattedNum,
+        service_date: lessonDate,
+        accrual_date: lessonDate,
+        student_id: lesson.student_id,
+        service_type: lesson.subject || 'Lekcja matematyki',
+        amount_due: lesson.price_snapshot,
+        amount_received: 0,
+        method: 'blik',
+        status: 'unpaid',
+        version: 1,
+        created_at: nowIso,
+        updated_at: nowIso
+      };
+      await commitChange('income_entries', 'insert', newIncome);
+      setIncomeEntries(prev => [...prev, newIncome]);
+    }
+  }, [lessons, charges, incomeEntries, assertNotClosedPeriod, commitChange, getNextIncomeNumber]);
+
+  /**
+   * POINT 2 FIX:
+   * Recording payment for a completed lesson as a clear, separate action.
+   */
+  const recordLessonPayment = useCallback(async (lessonId: UUID, method: PaymentMethod = 'blik') => {
+    const lesson = lessons.find(l => l.id === lessonId);
+    if (!lesson) return;
+
+    const nowIso = new Date().toISOString();
+    const dateToday = todayStr;
+    const lessonDate = lesson.start_at.slice(0, 10);
+
+    // Ensure lesson is completed and charge exists
+    if (lesson.status !== 'completed') {
+      await markLessonCompleted(lessonId);
+    }
+
+    const targetCharge = charges.find(c => c.lesson_id === lesson.id && c.amount > 0);
+
+    // Create Payment
     const newPayment: Payment = {
-      id: `pay-${Date.now()}`,
+      id: generateUUID(),
       student_id: lesson.student_id,
       amount: lesson.price_snapshot,
       received_date: dateToday,
       method,
-      description: `Płatność ${method.toUpperCase()} po lekcji`,
+      description: `Płatność ${method.toUpperCase()} za lekcję z ${lessonDate}`,
       payment_type: 'wplata',
       version: 1,
       created_at: nowIso,
@@ -284,48 +394,48 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await commitChange('payments', 'insert', newPayment);
     setPayments(prev => [...prev, newPayment]);
 
-    // 4. Create Payment Allocation
-    const newAlloc: PaymentAllocation = {
-      id: `al-${Date.now()}`,
-      payment_id: newPayment.id,
-      charge_id: newCharge.id,
-      amount: lesson.price_snapshot,
-      version: 1,
-      created_at: nowIso,
-      updated_at: nowIso
-    };
-    await commitChange('payment_allocations', 'insert', newAlloc);
-    setPaymentAllocations(prev => [...prev, newAlloc]);
+    // Create Allocation
+    if (targetCharge) {
+      const newAlloc: PaymentAllocation = {
+        id: generateUUID(),
+        payment_id: newPayment.id,
+        charge_id: targetCharge.id,
+        amount: lesson.price_snapshot,
+        version: 1,
+        created_at: nowIso,
+        updated_at: nowIso
+      };
+      await commitChange('payment_allocations', 'insert', newAlloc);
+      setPaymentAllocations(prev => [...prev, newAlloc]);
+    }
 
-    // 5. Generate consecutive income entry number (RRRR/NNN)
-    const currentYear = new Date().getFullYear();
-    const yearEntries = incomeEntries.filter(e => e.number.startsWith(`${currentYear}/`));
-    const nextNum = yearEntries.length + 1;
-    const formattedNum = `${currentYear}/${String(nextNum).padStart(3, '0')}`;
-
-    const newIncome: IncomeEntry = {
-      id: `inc-${Date.now()}`,
-      number: formattedNum,
-      service_date: lessonDate,
-      accrual_date: lessonDate,
-      received_date: dateToday,
-      student_id: lesson.student_id,
-      service_type: lesson.subject || 'Lekcja matematyki',
-      amount_due: lesson.price_snapshot,
-      amount_received: lesson.price_snapshot,
-      method,
-      status: 'paid',
-      version: 1,
-      created_at: nowIso,
-      updated_at: nowIso
-    };
-    await commitChange('income_entries', 'insert', newIncome);
-    setIncomeEntries(prev => [...prev, newIncome]);
-  }, [lessons, todayStr, commitChange, incomeEntries]);
+    // Update income entry
+    const entry = incomeEntries.find(e => e.service_date === lessonDate && e.student_id === lesson.student_id);
+    if (entry) {
+      const updatedEntry: IncomeEntry = {
+        ...entry,
+        received_date: dateToday,
+        amount_received: lesson.price_snapshot,
+        method,
+        status: 'paid',
+        version: entry.version + 1,
+        updated_at: nowIso
+      };
+      await commitChange('income_entries', 'update', updatedEntry);
+      setIncomeEntries(prev => prev.map(e => e.id === entry.id ? updatedEntry : e));
+    }
+  }, [lessons, charges, incomeEntries, todayStr, markLessonCompleted, commitChange]);
 
   const updateLessonStatus = useCallback(async (lessonId: UUID, status: Lesson['status'], note?: string) => {
     const lesson = lessons.find(l => l.id === lessonId);
     if (!lesson) return;
+
+    assertNotClosedPeriod(lesson.start_at);
+
+    if (status === 'completed') {
+      await markLessonCompleted(lessonId);
+      return;
+    }
 
     const nowIso = new Date().toISOString();
     const updatedLesson: Lesson = {
@@ -344,7 +454,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const assessment = assessCancellation(lesson, nowIso, DEFAULT_CANCEL_POLICY, status === 'no_show');
       if (!assessment.isFree && assessment.feeGrosze > 0) {
         const cancelCharge: Charge = {
-          id: `ch-cancel-${Date.now()}`,
+          id: generateUUID(),
           student_id: lesson.student_id,
           lesson_id: lesson.id,
           amount: assessment.feeGrosze,
@@ -359,11 +469,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setCharges(prev => [...prev, cancelCharge]);
       }
     }
-  }, [lessons, commitChange]);
+  }, [lessons, markLessonCompleted, assertNotClosedPeriod, commitChange]);
 
   const rescheduleLesson = useCallback(async (lessonId: UUID, newStartIso: string) => {
     const lesson = lessons.find(l => l.id === lessonId);
     if (!lesson) return;
+
+    assertNotClosedPeriod(lesson.start_at);
+    assertNotClosedPeriod(newStartIso);
 
     const nowIso = new Date().toISOString();
     const updatedLesson: Lesson = {
@@ -375,7 +488,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     const event: LessonEvent = {
-      id: `evt-${Date.now()}`,
+      id: generateUUID(),
       lesson_id: lesson.id,
       event_type: 'rescheduled',
       old_val: lesson.start_at,
@@ -391,16 +504,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setLessons(prev => prev.map(l => l.id === lessonId ? updatedLesson : l));
     setLessonEvents(prev => [...prev, event]);
-  }, [lessons, commitChange]);
+  }, [lessons, assertNotClosedPeriod, commitChange]);
 
   const createLesson = useCallback(async (lessonData: Partial<Lesson>): Promise<Lesson> => {
+    const startAt = lessonData.start_at || `${todayStr}T16:00:00`;
+    assertNotClosedPeriod(startAt);
+
     const student = students.find(s => s.id === lessonData.student_id);
     const nowIso = new Date().toISOString();
     const newLesson: Lesson = {
-      id: `les-${Date.now()}`,
+      id: generateUUID(),
       student_id: lessonData.student_id || '',
       series_id: lessonData.series_id,
-      start_at: lessonData.start_at || `${todayStr}T16:00:00`,
+      start_at: startAt,
       duration_min: lessonData.duration_min || student?.default_duration_min || 60,
       status: lessonData.status || 'planned',
       price_snapshot: lessonData.price_snapshot ?? (student?.default_rate || 7000),
@@ -414,12 +530,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     await commitChange('lessons', 'insert', newLesson);
     setLessons(prev => [...prev, newLesson]);
+
+    if (newLesson.status === 'completed') {
+      await markLessonCompleted(newLesson.id);
+    }
+
     return newLesson;
-  }, [students, todayStr, commitChange]);
+  }, [students, todayStr, assertNotClosedPeriod, markLessonCompleted, commitChange]);
 
   const createStudent = useCallback(async (studentData: Partial<Student>, guardianData?: Partial<Guardian>): Promise<Student> => {
     const nowIso = new Date().toISOString();
-    const studentId = `s-${Date.now()}`;
+    const studentId = generateUUID();
     const newStudent: Student = {
       id: studentId,
       first_name: studentData.first_name || '',
@@ -442,9 +563,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await commitChange('students', 'insert', newStudent);
     setStudents(prev => [...prev, newStudent]);
 
-    // Initial rate history
     const rh: RateHistory = {
-      id: `rh-${Date.now()}`,
+      id: generateUUID(),
       student_id: studentId,
       rate: newStudent.default_rate,
       valid_from: newStudent.start_date,
@@ -455,10 +575,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await commitChange('rate_history', 'insert', rh);
     setRateHistory(prev => [...prev, rh]);
 
-    // Add Guardian if provided
     if (guardianData && guardianData.full_name) {
       const newGuardian: Guardian = {
-        id: `g-${Date.now()}`,
+        id: generateUUID(),
         student_id: studentId,
         full_name: guardianData.full_name,
         phone: guardianData.phone || '',
@@ -503,7 +622,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await commitChange('students', 'update', anonymized);
     setStudents(prev => prev.map(s => s.id === studentId ? anonymized : s));
 
-    // Remove guardians data
     const studentGuardians = guardians.filter(g => g.student_id === studentId);
     for (const g of studentGuardians) {
       await commitChange('guardians', 'delete', g);
@@ -512,12 +630,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [students, guardians, commitChange]);
 
   const recordPayment = useCallback(async (paymentData: Partial<Payment>, autoAllocate = true): Promise<Payment> => {
+    const receivedDate = paymentData.received_date || todayStr;
+    assertNotClosedPeriod(receivedDate);
+
     const nowIso = new Date().toISOString();
     const newPayment: Payment = {
-      id: `pay-${Date.now()}`,
+      id: generateUUID(),
       student_id: paymentData.student_id || '',
       amount: paymentData.amount || 0,
-      received_date: paymentData.received_date || todayStr,
+      received_date: receivedDate,
       method: paymentData.method || 'blik',
       description: paymentData.description || 'Wpłata',
       payment_type: paymentData.payment_type || 'wplata',
@@ -529,7 +650,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await commitChange('payments', 'insert', newPayment);
     setPayments(prev => [...prev, newPayment]);
 
-    // FIFO allocation
     if (autoAllocate && newPayment.student_id) {
       const studentCharges = charges.filter(c => c.student_id === newPayment.student_id);
       const studentAllocs = paymentAllocations.filter(a => {
@@ -540,7 +660,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const proposed = proposeFifoAllocation(newPayment.amount, studentCharges, studentAllocs);
       for (const item of proposed.allocations) {
         const alloc: PaymentAllocation = {
-          id: `al-${Date.now()}-${item.chargeId.slice(-4)}`,
+          id: generateUUID(),
           payment_id: newPayment.id,
           charge_id: item.chargeId,
           amount: item.amount,
@@ -554,10 +674,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     return newPayment;
-  }, [todayStr, charges, paymentAllocations, commitChange]);
+  }, [todayStr, assertNotClosedPeriod, charges, paymentAllocations, commitChange]);
 
   const closePeriod = useCallback(async (periodId: UUID) => {
-    // Check if offline queue is empty (SPEC A2a requirement: "zamknięcie miesiąca zablokowane przy niepustej kolejce")
     if (offlineQueue.length > 0) {
       throw new Error('Zamknięcie okresu jest zablokowane: kolejka offline zawiera oczekujące zmiany. Połącz się z siecią i zsynchronizuj dane.');
     }
@@ -574,7 +693,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       updated_at: nowIso
     };
 
-    // Build monthly report data and snapshot v1
     const reportData = buildMonthlyReport(
       period,
       lessons,
@@ -582,8 +700,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       payments,
       paymentAllocations,
       students,
-      limitStatus.limitGrosze,
-      limitStatus.usedGrosze
+      legalParams
     );
 
     const snapshot = createSnapshotRecord(period.id, reportData, reportSnapshots);
@@ -593,7 +710,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setPeriods(prev => prev.map(p => p.id === periodId ? updatedPeriod : p));
     setReportSnapshots(prev => [...prev, snapshot]);
-  }, [offlineQueue.length, periods, lessons, charges, payments, paymentAllocations, students, limitStatus, reportSnapshots, commitChange]);
+  }, [offlineQueue.length, periods, lessons, charges, payments, paymentAllocations, students, legalParams, reportSnapshots, commitChange]);
 
   const reopenPeriodCorrection = useCallback(async (periodId: UUID, reason: string) => {
     const period = periods.find(p => p.id === periodId);
@@ -606,14 +723,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       payments,
       paymentAllocations,
       students,
-      limitStatus.limitGrosze,
-      limitStatus.usedGrosze
+      legalParams
     );
 
     const newSnapshot = createSnapshotRecord(period.id, reportData, reportSnapshots, reason);
     await commitChange('report_snapshots', 'insert', newSnapshot);
     setReportSnapshots(prev => [...prev, newSnapshot]);
-  }, [periods, lessons, charges, payments, paymentAllocations, students, limitStatus, reportSnapshots, commitChange]);
+  }, [periods, lessons, charges, payments, paymentAllocations, students, legalParams, reportSnapshots, commitChange]);
 
   const updateLegalParams = useCallback(async (params: LegalParams) => {
     const nowIso = new Date().toISOString();
@@ -627,7 +743,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const updated: Settings = {
       ...settings,
       ...newSettings,
-      version: settings.version + 1,
+      version: (settings.version || 1) + 1,
       updated_at: nowIso
     };
     await commitChange('settings', 'update', updated);
@@ -674,18 +790,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await refreshFromIDB();
   }, [refreshFromIDB]);
 
-  const resetToSampleData = useCallback(async () => {
+  const clearUserData = useCallback(async () => {
+    await IDBManager.clearAllUserData();
+    await refreshFromIDB();
+  }, [refreshFromIDB]);
+
+  const loadDemoData = useCallback(async () => {
     const db = await IDBManager.getDB();
-    const stores = [
-      'students', 'guardians', 'rate_history', 'lesson_series', 'lessons',
-      'charges', 'payments', 'payment_allocations', 'income_entries',
-      'legal_params', 'periods', 'report_snapshots', 'settings', 'offline_queue'
-    ];
-    for (const s of stores) {
-      const tx = db.transaction(s, 'readwrite');
-      tx.objectStore(s).clear();
-    }
-    await IDBManager.seedDefaults(db);
+    await IDBManager.clearAllUserData();
+    await IDBManager.seedDemoData(db);
     await refreshFromIDB();
   }, [refreshFromIDB]);
 
@@ -694,6 +807,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     isLocked,
     unlockWithPin,
     lockApp,
+    setAppPin,
     students,
     guardians,
     rateHistory,
@@ -710,11 +824,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     auditLogs,
     settings,
     offlineQueue,
+    todayStr,
     activeLegalParam,
     limitStatus,
     unconfirmedLessons,
     offlineQueueCount: offlineQueue.length,
-    quickCompleteLessonAndPay,
+    markLessonCompleted,
+    recordLessonPayment,
     updateLessonStatus,
     rescheduleLesson,
     createLesson,
@@ -732,12 +848,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     testConnection,
     exportBackup,
     restoreBackup,
-    resetToSampleData
+    clearUserData,
+    loadDemoData
   }), [
     isReady,
     isLocked,
     unlockWithPin,
     lockApp,
+    setAppPin,
     students,
     guardians,
     rateHistory,
@@ -754,10 +872,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     auditLogs,
     settings,
     offlineQueue,
+    todayStr,
     activeLegalParam,
     limitStatus,
     unconfirmedLessons,
-    quickCompleteLessonAndPay,
+    markLessonCompleted,
+    recordLessonPayment,
     updateLessonStatus,
     rescheduleLesson,
     createLesson,
@@ -775,7 +895,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     testConnection,
     exportBackup,
     restoreBackup,
-    resetToSampleData
+    clearUserData,
+    loadDemoData
   ]);
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

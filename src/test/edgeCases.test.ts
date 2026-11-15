@@ -205,7 +205,7 @@ describe('Specification Chapter 9: 12 Mandatory Edge Case Tests', () => {
     };
 
     // v1 Report
-    const rep1 = buildMonthlyReport(period, [lesson], [charge], [], [], [student], 1081350, 7000);
+    const rep1 = buildMonthlyReport(period, [lesson], [charge], [], [], [student], [params2026]);
     const snap1 = createSnapshotRecord(period.id, rep1, []);
     expect(snap1.version_num).toBe(1);
     expect(snap1.correction_reason).toBeUndefined();
@@ -224,7 +224,7 @@ describe('Specification Chapter 9: 12 Mandatory Edge Case Tests', () => {
       updated_at: '2026-04-05T10:00:00Z'
     };
 
-    const rep2 = buildMonthlyReport(period, [{ ...lesson, status: 'cancelled_student' }], [charge, stornoCharge], [], [], [student], 1081350, 0);
+    const rep2 = buildMonthlyReport(period, [{ ...lesson, status: 'cancelled_student' }], [charge, stornoCharge], [], [], [student], [params2026]);
     const snap2 = createSnapshotRecord(period.id, rep2, [snap1], 'Błędnie oznaczona lekcja jako odbyta');
 
     expect(snap2.version_num).toBe(2);

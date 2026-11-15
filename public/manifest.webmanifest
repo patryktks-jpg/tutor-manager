@@ -2,34 +2,45 @@
   "name": "Tutor Manager",
   "short_name": "Tutor",
   "description": "Prywatna aplikacja PWA dla korepetytora: grafik, uczniowie, finanse i limit działalności nierejestrowanej",
-  "start_url": "/#dzis",
-  "scope": "/",
+  "start_url": "./#dzis",
+  "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#F2F2F7",
   "theme_color": "#007AFF",
   "icons": [
     {
-      "src": "/icon.svg",
-      "sizes": "192x192 512x512",
-      "type": "image/svg+xml",
+      "src": "./apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png"
+    },
+    {
+      "src": "./icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
       "purpose": "any maskable"
     }
   ],
   "shortcuts": [
     {
       "name": "Plan na dziś",
-      "url": "/#dzis",
+      "url": "./#dzis",
       "description": "Dzisiejsze lekcje i limit"
     },
     {
       "name": "Dodaj lekcję",
-      "url": "/#dodaj-lekcje",
+      "url": "./#dodaj-lekcje",
       "description": "Szybkie zaplanowanie lekcji"
     },
     {
       "name": "Zarejestruj wpłatę",
-      "url": "/#dodaj-wplate",
+      "url": "./#dodaj-wplate",
       "description": "Zaksięguj wpłatę BLIK / gotówka"
     }
   ]

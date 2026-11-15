@@ -14,7 +14,7 @@ export const ReportsView: React.FC = () => {
     payments,
     paymentAllocations,
     students,
-    limitStatus,
+    legalParams,
     closePeriod,
     reopenPeriodCorrection,
     offlineQueueCount
@@ -48,10 +48,9 @@ export const ReportsView: React.FC = () => {
       payments,
       paymentAllocations,
       students,
-      limitStatus.limitGrosze,
-      limitStatus.usedGrosze
+      legalParams
     );
-  }, [selectedPeriod, activeSnapshot, lessons, charges, payments, paymentAllocations, students, limitStatus]);
+  }, [selectedPeriod, activeSnapshot, lessons, charges, payments, paymentAllocations, students, legalParams]);
 
   const handleClosePeriod = async (periodId: string) => {
     if (offlineQueueCount > 0) {

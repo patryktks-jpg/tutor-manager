@@ -1,17 +1,6 @@
-const CACHE_NAME = 'tutor-manager-cache-v2.1';
-const STATIC_ASSETS = [
-  '/',
-  '/index.html',
-  '/manifest.webmanifest',
-  '/icon.svg'
-];
+const CACHE_NAME = 'tutor-manager-cache-v2.2';
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => {
-      return cache.addAll(STATIC_ASSETS);
-    })
-  );
   self.skipWaiting();
 });
 
@@ -37,7 +26,6 @@ self.addEventListener('fetch', (event) => {
       return (
         cached ||
         fetch(event.request).then((response) => {
-          // Cache successful GET requests
           if (
             response &&
             response.status === 200 &&
@@ -52,6 +40,6 @@ self.addEventListener('fetch', (event) => {
           return response;
         })
       );
-    }).catch(() => caches.match('/index.html'))
+    })
   );
 });

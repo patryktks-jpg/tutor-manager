@@ -1,19 +1,27 @@
 /**
  * Tutor Manager - Google Apps Script Web App Backend
- * Wersja 2.1 (listopad 2026)
+ * Wersja 2.2 (listopad 2026)
  *
- * Zapewnia:
- * 1. Ochronę przed równoległym zapisem (LockService)
- * 2. Zapis zbiorczy (batch operations bez pętli po komórkach)
- * 3. Pobieranie przyrostowe wg 'updated_at'
- * 4. Odrzucanie edycji do zamkniętych okresów
- * 5. Niezmienniczą ewidencję i audyt
- * 6. Codzienną automatyczną kopię zapasową na Dysku Google (ostatnie 30)
- * 7. Synchronizację z Kalendarzem Google i przypomnienia mailowe
+ * Poprawki bezpieczeństwa i integralności:
+ * 1. Idempotencja przez 'processed_ops' (ochrona przed duplikatami przy ponawianiu op_id)
+ * 2. Blokada modyfikacji/zapisu do zamkniętych okresów rozliczeniowych
+ * 3. Całkowity zakaz 'delete' dla tabel finansowych (anulowanie tylko storno)
+ * 4. Kontrola wersji (Last-write-wins z weryfikacją wersji)
+ * 5. Obsługa text/plain z CORS
+ * 6. Bezpieczny token w ScriptProperties (brak hardcodowanego tokenu w repozytorium)
  */
 
-// Konfiguracja tajnego tokenu (wprowadź ten sam token w aplikacji PWA w Ustawieniach)
-var SECRET_TOKEN = 'TUTOR_SECRET_2026_MATH';
+function getSecretToken() {
+  var props = PropertiesService.getScriptProperties();
+  var token = props.getProperty('SECRET_TOKEN');
+  if (!token) {
+    // Jeśli token nie został jeszcze skonfigurowany w ScriptProperties,
+    // wygeneruj unikalny i zapisz w bezpiecznych właściwościach projektu
+    token = Utilities.getUuid();
+    props.setProperty('SECRET_TOKEN', token);
+  }
+  return token;
+}
 
 var TABLES = [
   'students',
@@ -34,21 +42,27 @@ var TABLES = [
   'settings'
 ];
 
-/**
- * Obsługa zapytań GET (Ping, pobieranie przyrostowe)
- */
+var IMMUTABLE_FINANCIAL_TABLES = [
+  'charges',
+  'payments',
+  'payment_allocations',
+  'income_entries',
+  'report_snapshots',
+  'audit_logs'
+];
+
 function doGet(e) {
   try {
     var params = e ? e.parameter : {};
     var action = params.action || 'ping';
     var token = params.token || '';
 
-    if (token !== SECRET_TOKEN && action !== 'ping') {
-      return jsonResponse({ status: 'error', message: 'Nieprawidłowy token autoryzacji' }, 401);
-    }
-
     if (action === 'ping') {
       return jsonResponse({ status: 'ok', message: 'Tutor Manager Backend gotowy do pracy.' });
+    }
+
+    if (token !== getSecretToken()) {
+      return jsonResponse({ status: 'error', message: 'Błędny token autoryzacji' }, 401);
     }
 
     if (action === 'pull') {
@@ -63,17 +77,15 @@ function doGet(e) {
   }
 }
 
-/**
- * Obsługa zapytań POST (Zapis pojedynczy lub paczka operacji offline)
- */
 function doPost(e) {
   var lock = LockService.getScriptLock();
   try {
-    // Blokada współbieżności do 30 sekund
     lock.waitLock(30000);
 
-    var body = JSON.parse(e.postData.contents);
-    if (body.token !== SECRET_TOKEN) {
+    var rawContent = e.postData.contents;
+    var body = JSON.parse(rawContent);
+
+    if (body.token !== getSecretToken()) {
       return jsonResponse({ status: 'error', message: 'Brak uprawnień (błędny token)' }, 401);
     }
 
@@ -89,7 +101,7 @@ function doPost(e) {
         results.push(res);
       }
 
-      return jsonResponse({ status: 'ok', processed: results.length });
+      return jsonResponse({ status: 'ok', processed: results.length, details: results });
     }
 
     return jsonResponse({ status: 'error', message: 'Nieznana akcja POST' });
@@ -101,8 +113,151 @@ function doPost(e) {
 }
 
 /**
- * Pobiera przyrostowo wiersze zmienione po dacie 'since'
+ * Zapewnia istnienie arkusza 'processed_ops' i sprawdza, czy dana operacja była już wykonana (idempotencja).
  */
+function isOpAlreadyProcessed(ss, opId) {
+  var sheet = ss.getSheetByName('processed_ops');
+  if (!sheet) {
+    sheet = ss.insertSheet('processed_ops');
+    sheet.appendRow(['op_id', 'processed_at']);
+    sheet.setFrozenRows(1);
+    return false;
+  }
+
+  var data = sheet.getDataRange().getValues();
+  for (var i = 1; i < data.length; i++) {
+    if (data[i][0] === opId) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function markOpProcessed(ss, opId) {
+  var sheet = ss.getSheetByName('processed_ops');
+  if (sheet) {
+    sheet.appendRow([opId, new Date().toISOString()]);
+  }
+}
+
+/**
+ * Sprawdza, czy podana data wpada w zamknięty okres rozliczeniowy.
+ */
+function isDateInClosedPeriod(ss, dateStr) {
+  if (!dateStr) return false;
+  var periodsSheet = ss.getSheetByName('periods');
+  if (!periodsSheet) return false;
+
+  var data = periodsSheet.getDataRange().getValues();
+  var headers = data[0];
+  var fromIdx = headers.indexOf('date_from');
+  var toIdx = headers.indexOf('date_to');
+  var statusIdx = headers.indexOf('status');
+
+  var d = dateStr.slice(0, 10);
+  for (var r = 1; r < data.length; r++) {
+    var status = data[r][statusIdx];
+    var from = data[r][fromIdx];
+    var to = data[r][toIdx];
+    if (status === 'closed' && d >= from && d <= to) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function applyOperation(ss, op) {
+  // Idempotencja: jeśli ta operacja op_id była już zaaplikowana, pomiń bez duplikowania!
+  if (isOpAlreadyProcessed(ss, op.op_id)) {
+    return { op_id: op.op_id, status: 'already_processed' };
+  }
+
+  // Ochrona integralności: zakaz delete w tabelach finansowych
+  if (op.action === 'delete' && IMMUTABLE_FINANCIAL_TABLES.indexOf(op.table) >= 0) {
+    throw new Error('Operacja usunięcia (delete) jest zabroniona dla tabeli finansowej: ' + op.table + '. Wymagane storno/korekta.');
+  }
+
+  // Sprawdzenie zamkniętego okresu
+  var record = op.record || {};
+  var recordDate = record.accrual_date || record.service_date || record.start_at || record.received_date;
+  if (isDateInClosedPeriod(ss, recordDate)) {
+    throw new Error('Modyfikacja zablokowana: data ' + recordDate + ' należy do zamkniętego okresu rozliczeniowego!');
+  }
+
+  var sheet = ss.getSheetByName(op.table);
+  if (!sheet) {
+    throw new Error('Zakładka nie istnieje: ' + op.table);
+  }
+
+  var data = sheet.getDataRange().getValues();
+  var headers = data[0];
+  var idIndex = headers.indexOf('id');
+  var versionIndex = headers.indexOf('version');
+
+  var recordId = record.id;
+  var rowIndex = -1;
+  var currentVersion = 0;
+
+  for (var r = 1; r < data.length; r++) {
+    if (data[r][idIndex] === recordId) {
+      rowIndex = r + 1;
+      currentVersion = Number(data[r][versionIndex]) || 0;
+      break;
+    }
+  }
+
+  // Kontrola wersji: jeśli wiersz w arkuszu ma wyższą wersję niż przychodząca, odrzuć
+  if (rowIndex > 0 && currentVersion > Number(record.version || 0)) {
+    throw new Error('Konflikt wersji dla rekordu ' + recordId + ' w tabeli ' + op.table + ' (arkusz: v' + currentVersion + ', dane: v' + record.version + ')');
+  }
+
+  var rowValues = [];
+  for (var c = 0; c < headers.length; c++) {
+    var colName = headers[c];
+    var v = record[colName];
+    if (v === undefined || v === null) {
+      v = '';
+    } else if (typeof v === 'object') {
+      v = JSON.stringify(v);
+    }
+    rowValues.push(v);
+  }
+
+  if (op.action === 'insert' || (op.action === 'update' && rowIndex === -1)) {
+    sheet.appendRow(rowValues);
+  } else if (op.action === 'update' && rowIndex > 0) {
+    sheet.getRange(rowIndex, 1, 1, headers.length).setValues([rowValues]);
+  } else if (op.action === 'delete' && rowIndex > 0) {
+    sheet.deleteRow(rowIndex);
+  }
+
+  // Zapisz w processed_ops
+  markOpProcessed(ss, op.op_id);
+
+  // Zapis do audit_log
+  logAudit(ss, op.table, recordId, op.action, JSON.stringify(record));
+
+  return { op_id: op.op_id, status: 'applied' };
+}
+
+function logAudit(ss, entity, entityId, action, afterJson) {
+  var auditSheet = ss.getSheetByName('audit_logs');
+  if (!auditSheet) return;
+
+  auditSheet.appendRow([
+    'audit-' + Utilities.getUuid(),
+    entity,
+    entityId,
+    action,
+    '',
+    afterJson,
+    new Date().toISOString(),
+    1,
+    new Date().toISOString(),
+    new Date().toISOString()
+  ]);
+}
+
 function fetchIncremental(sinceIso) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var result = {};
@@ -131,7 +286,6 @@ function fetchIncremental(sinceIso) {
         for (var c = 0; c < headers.length; c++) {
           var key = headers[c];
           var val = row[c];
-          // Rozpoznawanie pól JSON
           if (typeof val === 'string' && (val.startsWith('{') || val.startsWith('['))) {
             try { val = JSON.parse(val); } catch (e) {}
           }
@@ -147,87 +301,6 @@ function fetchIncremental(sinceIso) {
   return result;
 }
 
-/**
- * Aplikuje pojedynczą operację insert/update/delete do arkusza z kontrolą wersji
- */
-function applyOperation(ss, op) {
-  var sheet = ss.getSheetByName(op.table);
-  if (!sheet) {
-    throw new Error('Zakładka nie istnieje: ' + op.table);
-  }
-
-  var data = sheet.getDataRange().getValues();
-  var headers = data[0];
-  var idIndex = headers.indexOf('id');
-  var versionIndex = headers.indexOf('version');
-
-  var record = op.record;
-  var recordId = record.id;
-
-  var rowIndex = -1;
-  var currentVersion = 0;
-
-  for (var r = 1; r < data.length; r++) {
-    if (data[r][idIndex] === recordId) {
-      rowIndex = r + 1; // 1-based row index in sheet
-      currentVersion = Number(data[r][versionIndex]) || 0;
-      break;
-    }
-  }
-
-  // Budowanie wiersza zgodnie z kolejnością nagłówków
-  var rowValues = [];
-  for (var c = 0; c < headers.length; c++) {
-    var colName = headers[c];
-    var v = record[colName];
-    if (v === undefined || v === null) {
-      v = '';
-    } else if (typeof v === 'object') {
-      v = JSON.stringify(v);
-    }
-    rowValues.push(v);
-  }
-
-  if (op.action === 'insert' || (op.action === 'update' && rowIndex === -1)) {
-    sheet.appendRow(rowValues);
-  } else if (op.action === 'update' && rowIndex > 0) {
-    // Last-write-wins z weryfikacją wersji
-    sheet.getRange(rowIndex, 1, 1, headers.length).setValues([rowValues]);
-  } else if (op.action === 'delete' && rowIndex > 0) {
-    sheet.deleteRow(rowIndex);
-  }
-
-  // Zapis do audit_log
-  logAudit(ss, op.table, recordId, op.action, JSON.stringify(record));
-
-  return { op_id: op.op_id, status: 'applied' };
-}
-
-/**
- * Rejestruje zdarzenie w nienaruszalnym audit_log
- */
-function logAudit(ss, entity, entityId, action, afterJson) {
-  var auditSheet = ss.getSheetByName('audit_logs');
-  if (!auditSheet) return;
-
-  auditSheet.appendRow([
-    'audit-' + new Date().getTime(),
-    entity,
-    entityId,
-    action,
-    '',
-    afterJson,
-    new Date().toISOString(),
-    1,
-    new Date().toISOString(),
-    new Date().toISOString()
-  ]);
-}
-
-/**
- * Codzienna automatyczna kopia zapasowa całego Arkusza na Dysku Google (ostatnie 30)
- * Wywoływana przez wyzwalacz czasowy (Time-driven trigger)
- */
 function createDailyBackup() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var file = DriveApp.getFileById(ss.getId());
@@ -240,7 +313,6 @@ function createDailyBackup() {
   var copyName = 'Kopia_TutorManager_' + dateStr;
   file.makeCopy(copyName, targetFolder);
 
-  // Rotacja: zachowaj tylko 30 najnowszych kopii
   var existingFiles = targetFolder.getFiles();
   var list = [];
   while (existingFiles.hasNext()) {
@@ -258,11 +330,7 @@ function createDailyBackup() {
   }
 }
 
-/**
- * Pomocnik odpowiedzi JSON
- */
 function jsonResponse(obj, statusCode) {
-  var output = ContentService.createTextOutput(JSON.stringify(obj))
+  return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
-  return output;
 }

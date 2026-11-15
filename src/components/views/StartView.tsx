@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Money } from '../../domain/money';
 import { Lesson, PaymentMethod } from '../../domain/types';
+import { getChargesBalance } from '../../domain/allocation';
 import { SwipeableCard } from '../common/SwipeableCard';
 import { NotificationBanner } from '../common/NotificationBanner';
 import { IconGear, IconCheck, IconX, IconCalendar, IconStudents } from '../common/Icons';
@@ -18,30 +19,31 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
     students,
     charges,
     payments,
+    paymentAllocations,
     limitStatus,
-    quickCompleteLessonAndPay,
+    todayStr,
+    markLessonCompleted,
+    recordLessonPayment,
     updateLessonStatus,
     rescheduleLesson
   } = useApp();
 
   const [selectedLesson, setSelectedLesson] = useState<Lesson | null>(null);
   const [showActionModal, setShowActionModal] = useState(false);
+  const [showPayModal, setShowPayModal] = useState(false);
+  const [payMethod, setPayMethod] = useState<PaymentMethod>('blik');
   const [rescheduleDate, setRescheduleDate] = useState('');
 
-  // Format today's date in Polish
-  const today = useMemo(() => new Date(), []);
-  const todayStr = useMemo(() => {
-    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-  }, [today]);
-
   const formattedTodayDate = useMemo(() => {
-    return today.toLocaleDateString('pl-PL', {
+    const [y, m, d] = todayStr.split('-').map(Number);
+    const dateObj = new Date(y, m - 1, d);
+    return dateObj.toLocaleDateString('pl-PL', {
       weekday: 'long',
       day: 'numeric',
       month: 'long',
       year: 'numeric'
     });
-  }, [today]);
+  }, [todayStr]);
 
   // Lessons today
   const todaysLessons = useMemo(() => {
@@ -52,15 +54,14 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
 
   // Weekly stats
   const weeklyStats = useMemo(() => {
-    // Current week Monday to Sunday
-    const d = new Date(today);
-    const day = d.getDay();
-    const diff = d.getDate() - day + (day === 0 ? -6 : 1);
-    const monday = new Date(d.setDate(diff));
+    const [y, m, d] = todayStr.split('-').map(Number);
+    const dateObj = new Date(y, m - 1, d);
+    const day = dateObj.getDay();
+    const diff = dateObj.getDate() - day + (day === 0 ? -6 : 1);
+    const monday = new Date(dateObj.setDate(diff));
     monday.setHours(0, 0, 0, 0);
     const sunday = new Date(monday);
     sunday.setDate(monday.getDate() + 6);
-    sunday.setHours(23, 59, 59, 999);
 
     const monStr = monday.toISOString().slice(0, 10);
     const sunStr = sunday.toISOString().slice(0, 10);
@@ -95,9 +96,8 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
       toPayGrosze: Math.max(0, accruedGrosze - receivedGrosze),
       activeStudentsCount: students.filter(s => s.status === 'active').length
     };
-  }, [today, lessons, charges, payments, students]);
+  }, [todayStr, lessons, charges, payments, students]);
 
-  // Limit progress bar color
   const limitBarColor = useMemo(() => {
     switch (limitStatus.alertLevel) {
       case 'critical': return 'var(--ios-red)';
@@ -108,11 +108,16 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
     }
   }, [limitStatus.alertLevel]);
 
-  const handleQuickPay = async (lesson: Lesson, method: PaymentMethod = 'blik') => {
-    await quickCompleteLessonAndPay(lesson.id, method);
+  // Check payment status of each lesson
+  const balanceMap = useMemo(() => {
+    return getChargesBalance(charges, paymentAllocations);
+  }, [charges, paymentAllocations]);
+
+  const handleSwipeComplete = async (lesson: Lesson) => {
+    await markLessonCompleted(lesson.id);
   };
 
-  const handleCancel = async (lesson: Lesson) => {
+  const handleSwipeCancel = async (lesson: Lesson) => {
     await updateLessonStatus(lesson.id, 'cancelled_student');
   };
 
@@ -120,6 +125,11 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
     setSelectedLesson(lesson);
     setRescheduleDate(lesson.start_at.slice(0, 16));
     setShowActionModal(true);
+  };
+
+  const openPayDialog = (lesson: Lesson) => {
+    setSelectedLesson(lesson);
+    setShowPayModal(true);
   };
 
   return (
@@ -154,14 +164,13 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
         </button>
       </div>
 
-      {/* Notifications / Alerts banner */}
       <NotificationBanner />
 
       {/* Section: Today's lessons card list with swipe */}
       <div style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
           <h2 style={{ fontSize: 18, fontWeight: 700 }}>Plan na dziś</h2>
-          <span style={{ fontSize: 12, color: 'var(--ios-text-secondary)' }}>Swipe ➔ Zrealizuj + BLIK</span>
+          <span style={{ fontSize: 12, color: 'var(--ios-text-secondary)' }}>Swipe ➔ Zrealizuj</span>
         </div>
 
         {todaysLessons.length === 0 ? (
@@ -177,11 +186,18 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
             const isCancelled = lesson.status.startsWith('cancelled');
             const timeStr = lesson.start_at.slice(11, 16);
 
+            // Check charge and payment status
+            const charge = charges.find(c => c.lesson_id === lesson.id && c.amount > 0);
+            const b = charge ? balanceMap.get(charge.id) : null;
+            const isPaid = b?.status === 'paid';
+
             return (
               <SwipeableCard
                 key={lesson.id}
-                onSwipeRight={() => !isCompleted && handleQuickPay(lesson, 'blik')}
-                onSwipeLeft={() => !isCompleted && !isCancelled && handleCancel(lesson)}
+                rightLabel="Zrealizowana"
+                leftLabel="Odwołaj"
+                onSwipeRight={() => !isCompleted && handleSwipeComplete(lesson)}
+                onSwipeLeft={() => !isCompleted && !isCancelled && handleSwipeCancel(lesson)}
               >
                 <div
                   className="ios-card"
@@ -194,7 +210,13 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                     marginBottom: 0,
                     opacity: isCancelled ? 0.6 : 1,
                     borderLeft: `4px solid ${
-                      isCompleted ? 'var(--ios-green)' : isCancelled ? 'var(--ios-red)' : 'var(--ios-blue)'
+                      isPaid
+                        ? 'var(--ios-green)'
+                        : isCompleted
+                        ? 'var(--ios-amber)'
+                        : isCancelled
+                        ? 'var(--ios-red)'
+                        : 'var(--ios-blue)'
                     }`
                   }}
                 >
@@ -202,8 +224,15 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
                       <span style={{ fontSize: 16, fontWeight: 700 }}>{timeStr}</span>
                       <span style={{ fontSize: 12, color: 'var(--ios-text-secondary)' }}>({lesson.duration_min} min)</span>
-                      {isCompleted && <span className="ios-badge ios-badge-green">Opłacono</span>}
-                      {isCancelled && <span className="ios-badge ios-badge-red">Odwołana</span>}
+                      {isPaid ? (
+                        <span className="ios-badge ios-badge-green">Opłacona</span>
+                      ) : isCompleted ? (
+                        <span className="ios-badge ios-badge-amber">Do zapłaty</span>
+                      ) : isCancelled ? (
+                        <span className="ios-badge ios-badge-red">Odwołana</span>
+                      ) : (
+                        <span className="ios-badge ios-badge-blue">Plan</span>
+                      )}
                     </div>
                     <div style={{ fontSize: 16, fontWeight: 600 }}>
                       {student ? `${student.first_name} ${student.last_name}` : 'Uczeń'}
@@ -217,16 +246,30 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                     <div style={{ fontSize: 17, fontWeight: 700 }}>
                       {Money.format(lesson.price_snapshot)}
                     </div>
+
                     {!isCompleted && !isCancelled && (
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleQuickPay(lesson, 'blik');
+                          handleSwipeComplete(lesson);
+                        }}
+                        className="ios-btn ios-btn-primary"
+                        style={{ padding: '4px 10px', fontSize: 12, minHeight: 32, marginTop: 4 }}
+                      >
+                        <IconCheck size={14} /> Zrealizuj
+                      </button>
+                    )}
+
+                    {isCompleted && !isPaid && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openPayDialog(lesson);
                         }}
                         className="ios-btn ios-btn-success"
                         style={{ padding: '4px 10px', fontSize: 12, minHeight: 32, marginTop: 4 }}
                       >
-                        <IconCheck size={14} /> BLIK
+                        Zapłać BLIK
                       </button>
                     )}
                   </div>
@@ -333,35 +376,7 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
         </div>
       </div>
 
-      {/* Monthly visual trend comparison (SVG bar chart) */}
-      <div className="ios-card" style={{ marginBottom: 20 }}>
-        <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>Trendy przychodów (Październik vs Listopad 2026)</h3>
-        <div style={{ display: 'flex', alignItems: 'flex-end', justifyContent: 'space-around', height: 110, paddingTop: 10 }}>
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 4 }}>7 200 zł</div>
-            <div style={{ width: 48, height: 70, backgroundColor: 'var(--ios-text-tertiary)', borderRadius: 6, margin: '0 auto' }} />
-            <div style={{ fontSize: 12, color: 'var(--ios-text-secondary)', marginTop: 6 }}>Październik</div>
-          </div>
-
-          <div style={{ textAlign: 'center' }}>
-            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--ios-blue)', marginBottom: 4 }}>
-              {Money.format(limitStatus.usedGrosze - 720000)}
-            </div>
-            <div
-              style={{
-                width: 48,
-                height: Math.max(20, Math.min(85, Math.round(((limitStatus.usedGrosze - 720000) / 720000) * 70))),
-                backgroundColor: 'var(--ios-blue)',
-                borderRadius: 6,
-                margin: '0 auto'
-              }}
-            />
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ios-blue)', marginTop: 6 }}>Listopad</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Action modal for selected lesson (Reschedule, No-show, etc.) */}
+      {/* Action modal for selected lesson */}
       {showActionModal && selectedLesson && (
         <div className="ios-modal-overlay" onClick={() => setShowActionModal(false)}>
           <div className="ios-modal-content" onClick={e => e.stopPropagation()}>
@@ -374,24 +389,26 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
             </p>
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <button
-                className="ios-btn ios-btn-success"
-                onClick={async () => {
-                  await handleQuickPay(selectedLesson, 'blik');
-                  setShowActionModal(false);
-                }}
-              >
-                <IconCheck size={18} /> Zrealizowana + Opłacona BLIK
-              </button>
+              {selectedLesson.status !== 'completed' && (
+                <button
+                  className="ios-btn ios-btn-primary"
+                  onClick={async () => {
+                    await markLessonCompleted(selectedLesson.id);
+                    setShowActionModal(false);
+                  }}
+                >
+                  <IconCheck size={18} /> Oznacz jako zrealizowaną
+                </button>
+              )}
 
               <button
-                className="ios-btn ios-btn-secondary"
-                onClick={async () => {
-                  await handleQuickPay(selectedLesson, 'gotowka');
+                className="ios-btn ios-btn-success"
+                onClick={() => {
                   setShowActionModal(false);
+                  setShowPayModal(true);
                 }}
               >
-                <IconCheck size={18} /> Zrealizowana + Gotówka
+                <IconCheck size={18} /> Zarejestruj wpłatę
               </button>
 
               <button
@@ -435,6 +452,45 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                 onClick={() => setShowActionModal(false)}
               >
                 Anuluj
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Pay modal */}
+      {showPayModal && selectedLesson && (
+        <div className="ios-modal-overlay" onClick={() => setShowPayModal(false)}>
+          <div className="ios-modal-content" onClick={e => e.stopPropagation()}>
+            <div className="ios-modal-grabber" />
+            <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Zarejestruj wpłatę za lekcję</h3>
+            <p style={{ fontSize: 13, color: 'var(--ios-text-secondary)', marginBottom: 14 }}>
+              Kwota do zapłaty: <strong>{Money.format(selectedLesson.price_snapshot)}</strong>
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600 }}>Metoda płatności:</label>
+                <select
+                  className="ios-input"
+                  value={payMethod}
+                  onChange={e => setPayMethod(e.target.value as PaymentMethod)}
+                >
+                  <option value="blik">BLIK</option>
+                  <option value="gotowka">Gotówka</option>
+                  <option value="przelew">Przelew</option>
+                  <option value="inna">Inna</option>
+                </select>
+              </div>
+
+              <button
+                className="ios-btn ios-btn-success"
+                onClick={async () => {
+                  await recordLessonPayment(selectedLesson.id, payMethod);
+                  setShowPayModal(false);
+                }}
+              >
+                <IconCheck size={18} /> Zaksięguj wpłatę ({payMethod.toUpperCase()})
               </button>
             </div>
           </div>

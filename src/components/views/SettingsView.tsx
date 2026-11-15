@@ -15,12 +15,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
     updateSettings,
     updateLegalParams,
     acceptLegalDeclaration,
+    setAppPin,
     testConnection,
     syncNow,
     syncStatus,
     exportBackup,
     restoreBackup,
-    resetToSampleData,
+    clearUserData,
+    loadDemoData,
     lockApp
   } = useApp();
 
@@ -35,13 +37,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
   const [testResult, setTestResult] = useState<{ success?: boolean; message?: string }>({});
   const [isTesting, setIsTesting] = useState(false);
 
-  // Legal params 2026 / 2027
+  // Legal params
   const [minWageStr, setMinWageStr] = useState(Money.format(activeLegalParam.min_wage, false));
   const [factorPct, setFactorPct] = useState(activeLegalParam.factor_pct);
 
-  // PIN settings
+  // PIN
   const [pinEnabled, setPinEnabled] = useState(settings.pin_enabled || false);
-  const [newPin, setNewPin] = useState(settings.pin_hash || '1234');
+  const [newPin, setNewPin] = useState('');
 
   const handleSaveTutorProfile = async () => {
     const rateGrosze = Money.parse(defaultRateStr);
@@ -82,11 +84,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
   };
 
   const handleSavePin = async () => {
-    await updateSettings({
-      pin_enabled: pinEnabled,
-      pin_hash: newPin
-    });
-    alert('Zapisano ustawienia zabezpieczeń PIN.');
+    if (newPin && newPin.length === 4) {
+      await setAppPin(newPin);
+      alert('Kod PIN został bezpiecznie zahashowany algorytmem SHA-256 i zapisany.');
+      setNewPin('');
+    } else {
+      await updateSettings({ pin_enabled: pinEnabled });
+      alert('Zapisano status blokady.');
+    }
   };
 
   const handleDownloadBackup = async () => {
@@ -132,7 +137,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
         </button>
       </div>
 
-      {/* 1. Oświadczenie prawne działalności nierejestrowanej (Chapter 4.5) */}
+      {/* 1. Oświadczenie prawne działalności nierejestrowanej */}
       <div className="ios-card" style={{ borderLeft: '4px solid var(--ios-blue)', marginBottom: 16 }}>
         <h3 style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>
           Oświadczenie działalności nierejestrowanej
@@ -196,7 +201,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
         </div>
       </div>
 
-      {/* 3. Limity prawne (2026 i symulator 2027) */}
+      {/* 3. Limity prawne */}
       <div className="ios-card" style={{ marginBottom: 16 }}>
         <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
           Parametry prawne (Rok {activeLegalParam.year})
@@ -245,7 +250,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
           Arkusz Google (Google Apps Script Web App)
         </h3>
         <p style={{ fontSize: 12, color: 'var(--ios-text-secondary)', marginBottom: 12 }}>
-          Aplikacja działa w pełni offline z IndexedDB. Podaj adres Web App z Apps Script, aby automatycznie synchronizować dane do swojego Arkusza.
+          Podaj adres Web App z Apps Script, aby automatycznie synchronizować dane do swojego prywatnego Arkusza Google.
         </p>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -261,7 +266,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
           </div>
 
           <div>
-            <label style={{ fontSize: 12, fontWeight: 600 }}>Tajny Token (Bearer Token)</label>
+            <label style={{ fontSize: 12, fontWeight: 600 }}>Tajny Token (SECRET_TOKEN ze skryptu)</label>
             <input
               type="password"
               className="ios-input"
@@ -321,10 +326,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
         </div>
       </div>
 
-      {/* 5. Bezpieczeństwo i PIN */}
+      {/* 5. Bezpieczeństwo i PIN (SHA-256 Hashing) */}
       <div className="ios-card" style={{ marginBottom: 16 }}>
         <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
-          Zabezpieczenie aplikacji (PIN / Biometria)
+          Zabezpieczenie ekranu (Blokada PIN)
         </h3>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -342,10 +347,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
 
           {pinEnabled && (
             <div>
-              <label style={{ fontSize: 12, fontWeight: 600 }}>Kod PIN (4 cyfry)</label>
+              <label style={{ fontSize: 12, fontWeight: 600 }}>Nowy kod PIN (4 cyfry)</label>
               <input
                 type="password"
                 maxLength={4}
+                placeholder="Wpisz 4 cyfry"
                 className="ios-input"
                 value={newPin}
                 onChange={e => setNewPin(e.target.value)}
@@ -354,7 +360,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
           )}
 
           <button onClick={handleSavePin} className="ios-btn ios-btn-secondary">
-            Zapisz PIN
+            Zapisz ustawienia PIN
           </button>
 
           {pinEnabled && (
@@ -365,14 +371,39 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
         </div>
       </div>
 
-      {/* 6. Kopie zapasowe & Reset */}
+      {/* 6. Zarządzanie danymi (Czysta baza vs demo) */}
       <div className="ios-card" style={{ marginBottom: 16 }}>
         <h3 style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
-          Kopie zapasowe i reset
+          Zarządzanie danymi
         </h3>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <button
+            onClick={() => {
+              if (confirm('Czy chcesz wyczyścić wszystkie dane i zacząć od zera? (Parametry prawne zostaną zachowane)')) {
+                clearUserData();
+                alert('Baza danych została wyczyszczona. Możesz wprowadzać własnych uczniów.');
+              }
+            }}
+            className="ios-btn ios-btn-secondary"
+            style={{ color: 'var(--ios-red)' }}
+          >
+            Wyczyść dane (Zacznij od zera)
+          </button>
+
+          <button
+            onClick={() => {
+              if (confirm('Czy chcesz załadować przykładowe dane demonstracyjne (uczniowie, lekcje)?')) {
+                loadDemoData();
+                alert('Załadowano dane demonstracyjne.');
+              }
+            }}
+            className="ios-btn ios-btn-secondary"
+          >
+            Załaduj przykładowe dane (demo)
+          </button>
+
           <button onClick={handleDownloadBackup} className="ios-btn ios-btn-secondary">
-            Eksportuj pełną bazę (JSON)
+            Eksportuj kopię bazy (JSON)
           </button>
 
           <div>
@@ -386,18 +417,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
               />
             </label>
           </div>
-
-          <button
-            onClick={() => {
-              if (confirm('Czy na pewno chcesz przywrócić dane przykładowe? Wszystkie zmiany zostaną nadpisane.')) {
-                resetToSampleData();
-              }
-            }}
-            className="ios-btn ios-btn-danger"
-            style={{ marginTop: 8 }}
-          >
-            Przywróć dane przykładowe
-          </button>
         </div>
       </div>
     </div>

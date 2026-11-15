@@ -1,4 +1,4 @@
-# Tutor Manager – Instrukcja instalacji Arkusza Google i Apps Script
+# Tutor Manager – Instrukcja instalacji Arkusza Google i Apps Script (v2.2)
 
 ## Krok 1. Utworzenie nowego Arkusza Google
 1. Wejdź na [Google Sheets](https://sheets.google.com) na swoim prywatnym koncie Google i utwórz czysty arkusz.
@@ -8,29 +8,34 @@
 1. W menu górnym wybierz: **Rozszerzenia** (Extensions) ➔ **Apps Script**.
 2. Wklej zawartość pliku `SetupSheet.gs` do edytora skryptu.
 3. Utwórz drugi plik o nazwie `Code.gs` i wklej do niego zawartość pliku `Code.gs`.
-4. W pliku `Code.gs` możesz zmienić wartość stałej `SECRET_TOKEN` na własny tajny ciąg znaków (np. `moj_super_tajny_token_2026`).
 
-## Krok 3. Jednorazowa inicjalizacja zakładek
+## Krok 3. Bezpieczny token (Script Properties)
+Zgodnie z zasadami bezpieczeństwa, tajny token nie jest trzymany jawnie w kodzie:
+1. W edytorze Apps Script po lewej stronie kliknij ikonę **Ustawienia projektu** (zębatka ⚙️).
+2. Przewiń w dół do sekcji **Właściwości skryptu** (Script properties) i kliknij **Dodaj właściwość skryptu**:
+   - **Właściwość**: `SECRET_TOKEN`
+   - **Wartość**: Wpisz własny, długi, tajny ciąg znaków (np. `Korki2026_Matematyka_!SekretnyToken#99`)
+3. Kliknij **Zapisz właściwości skryptu**.
+*(Ten sam token wpiszesz w aplikacji w telefonie w Ustawienia ➔ Arkusz Google)*.
+
+## Krok 4. Inicjalizacja zakładek i tabel
 1. W górnym pasku edytora Apps Script wybierz funkcję `initializeAllSheets` z listy rozwijanej i kliknij **Uruchom** (Run).
-2. Google poprosi o jednorazowe przyznanie uprawnień do edycji Twojego arkusza i tworzenia kopii na Dysku Google – zatwierdź je.
-3. W Twoim arkuszu automatycznie powstaną wszystkie zakładki tabel: `students`, `guardians`, `rate_history`, `lesson_series`, `lessons`, `charges`, `payments`, `income_entries`, itd., a także włączy się codzienny wyzwalacz kopii zapasowej o godz. 02:00.
+2. Zatwierdź jednorazowe uprawnienia do edycji Twojego arkusza i Dysku Google.
+3. W arkuszu powstaną wszystkie zakładki tabel: `students`, `guardians`, `rate_history`, `lesson_series`, `lessons`, `charges`, `payments`, `income_entries`, `processed_ops`, itd., a także codzienny wyzwalacz kopii zapasowej o godz. 02:00.
 
-## Krok 4. Wdrożenie jako aplikacja internetowa (Web App)
-1. W prawym górnym rogu kliknij niebieski przycisk **Wdróż** (Deploy) ➔ **Nowe wdrożenie** (New deployment).
+## Krok 5. Wdrożenie jako aplikacja internetowa (Web App)
+1. W prawym górnym rogu kliknij **Wdróż** (Deploy) ➔ **Nowe wdrożenie** (New deployment).
 2. Wybierz typ: **Aplikacja internetowa** (Web app).
-3. W konfiguracji ustaw:
-   - **Opis**: Wersja produkcyjna Tutor Manager
+3. Ustaw:
    - **Wykonaj jako**: Ja (*Twój adres e-mail*)
-   - **Kto ma dostęp**: Każdy (*Anyone*) – dostęp zabezpiecza Twój tajny token `SECRET_TOKEN`.
+   - **Kto ma dostęp**: Każdy (*Anyone*) – dostęp jest w 100% chroniony przez Twój `SECRET_TOKEN`.
 4. Kliknij **Wdróż** (Deploy) i skopiuj wygenerowany **Adres URL aplikacji internetowej** (kończący się na `/exec`).
 
-## Krok 5. Połączenie w aplikacji Tutor Manager (PWA)
+## Krok 6. Połączenie w aplikacji Tutor Manager
 1. Otwórz aplikację Tutor Manager na iPhonie lub w przeglądarce.
-2. Przejdź do **Ustawienia** (ikona zębatki w prawym górnym rogu ekranu Start).
-3. W sekcji **Arkusz Google** wklej:
-   - Skopiowany **Web App URL**
-   - Twój **Tajny Token** (`SECRET_TOKEN`)
-4. Kliknij **Testuj połączenie** – pojawi się zielony komunikat o sukcesie.
+2. Przejdź do **Ustawienia** ➔ sekcja **Arkusz Google**.
+3. Wklej:
+   - **Web App URL**
+   - **SECRET_TOKEN** (ten sam, który podałeś we Właściwościach skryptu)
+4. Kliknij **Testuj połączenie** (zielony komunikat potwierdza działanie bez problemów z CORS).
 5. Kliknij **Zapisz URL**.
-
-Od tej chwili każde kliknięcie po lekcji, dodanie ucznia i zmiana automatycznie zapisują się w Twoim prywatnym Arkuszu Google, a w razie braku zasięgu kolejka offline synchronizuje się natychmiast po powrocie internetu!
