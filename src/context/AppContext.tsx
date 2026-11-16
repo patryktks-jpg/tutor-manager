@@ -148,13 +148,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const refreshFromIDB = useCallback(async () => {
     const data = await IDBManager.loadInitialState();
+
+    // Automatyczna deduplikacja omyłkowych podwójnych naliczeń za tę samą lekcję (FIX na 320 zł -> 160 zł)
+    const seenLessonCharges = new Set<string>();
+    const duplicateChargeIds: string[] = [];
+    const cleanCharges: Charge[] = [];
+
+    for (const c of data.charges) {
+      if (c.charge_type === 'lesson' && c.lesson_id) {
+        if (seenLessonCharges.has(c.lesson_id)) {
+          duplicateChargeIds.push(c.id);
+        } else {
+          seenLessonCharges.add(c.lesson_id);
+          cleanCharges.push(c);
+        }
+      } else {
+        cleanCharges.push(c);
+      }
+    }
+
+    if (duplicateChargeIds.length > 0) {
+      const db = await IDBManager.getDB();
+      for (const dupId of duplicateChargeIds) {
+        await IDBManager.delete('charges', dupId);
+      }
+      const allOps = await IDBManager.getAll<OfflineOperation>(db, 'offline_queue');
+      for (const op of allOps) {
+        if (op.table === 'charges' && duplicateChargeIds.includes(op.record?.id)) {
+          await IDBManager.delete('offline_queue', op.op_id);
+        }
+      }
+    }
+
     setStudents(data.students);
     setGuardians(data.guardians);
     setRateHistory(data.rate_history);
     setLessonSeries(data.lesson_series);
     setLessons(data.lessons);
     setLessonEvents(data.lesson_events);
-    setCharges(data.charges);
+    setCharges(cleanCharges);
     setPayments(data.payments);
     setPaymentAllocations(data.payment_allocations);
     setPackages(data.packages);
@@ -164,7 +196,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setReportSnapshots(data.report_snapshots);
     setAuditLogs(data.audit_logs);
     setSettings(data.settings);
-    setOfflineQueue(data.offline_queue);
+    setOfflineQueue(data.offline_queue.filter(op => !(op.table === 'charges' && duplicateChargeIds.includes(op.record?.id))));
     setRejectedOperations(data.rejected_operations || []);
 
     if (data.settings.pin_enabled && data.settings.pin_hash) {
@@ -314,12 +346,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const year = Number(lessonDate.slice(0, 4));
     const nextIncomeNum = getNextIncomeNumber(year);
 
+    const db = await IDBManager.getDB();
+    const freshCharges = await IDBManager.getAll<Charge>(db, 'charges');
+    const freshAllocations = await IDBManager.getAll<PaymentAllocation>(db, 'payment_allocations');
+    const freshIncome = await IDBManager.getAll<IncomeEntry>(db, 'income_entries');
+
     // Compute all entities via pure domain function
     const payload = buildCompleteAndPayPayload(
       lesson,
-      charges,
-      paymentAllocations,
-      incomeEntries,
+      freshCharges,
+      freshAllocations,
+      freshIncome,
       dateToday,
       nextIncomeNum,
       method,
@@ -427,7 +464,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setLessons(prev => prev.map(l => l.id === lessonId ? updatedLesson : l));
 
     // 2. Create Charge if not already existing
-    const existingCharge = charges.find(c => c.lesson_id === lesson.id && c.amount > 0);
+    const db = await IDBManager.getDB();
+    const freshCharges = await IDBManager.getAll<Charge>(db, 'charges');
+    const existingCharge = freshCharges.find(c => c.lesson_id === lesson.id && c.amount > 0);
 
     if (!existingCharge) {
       const newCharge: Charge = {
@@ -494,11 +533,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
 
-    const targetCharge = charges.find(c => c.lesson_id === lesson.id && c.amount > 0);
+    const db = await IDBManager.getDB();
+    const freshCharges = await IDBManager.getAll<Charge>(db, 'charges');
+    const freshAllocations = await IDBManager.getAll<PaymentAllocation>(db, 'payment_allocations');
+    const targetCharge = freshCharges.find(c => c.lesson_id === lesson.id && c.amount > 0);
 
     // Ochrona przed zdublowaną wpłatą: jeśli należność jest już w pełni opłacona, nic nie rób
     if (targetCharge) {
-      const existingAllocated = paymentAllocations
+      const existingAllocated = freshAllocations
         .filter(a => a.charge_id === targetCharge.id)
         .reduce((sum, a) => sum + a.amount, 0);
       if (existingAllocated >= targetCharge.amount) {
@@ -687,6 +729,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       start_date: studentData.start_date || todayStr,
       status: 'active',
       notes: studentData.notes || '',
+      birth_day: studentData.birth_day,
+      birth_month: studentData.birth_month,
       version: 1,
       created_at: nowIso,
       updated_at: nowIso

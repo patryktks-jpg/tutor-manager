@@ -9,7 +9,8 @@ import { buildCompleteAndPayPayload } from '../domain/lessonOps';
 import { calculateLimitGrosze, calculateQuarterLimitStatus } from '../domain/limit';
 import { calculateAccrualDate } from '../domain/accrual';
 import { createSnapshotRecord } from '../domain/periods';
-import { Lesson, LessonSeries, LegalParams } from '../domain/types';
+import { Lesson, LessonSeries, LegalParams, Student } from '../domain/types';
+import { formatStudentBirthday } from '../components/views/StudentsView';
 
 describe('Domain Full Coverage Suite (≥ 90%)', () => {
   it('covers cancelPolicy module completely', () => {
@@ -360,5 +361,83 @@ describe('Domain Full Coverage Suite (≥ 90%)', () => {
     expect(payloadUpdate.updatedIncomeEntry!.amount_received).toBe(7500);
     expect(payloadUpdate.updatedIncomeEntry!.method).toBe('przelew');
     expect(payloadUpdate.updatedIncomeEntry!.version).toBe(2);
+  });
+
+  it('correctly formats student birthday and supports day/month fields', () => {
+    expect(formatStudentBirthday(15, 5)).toBe('15 maja');
+    expect(formatStudentBirthday(1, 1)).toBe('1 stycznia');
+    expect(formatStudentBirthday(31, 12)).toBe('31 grudnia');
+    expect(formatStudentBirthday(undefined, 5)).toBe('');
+    expect(formatStudentBirthday(15, undefined)).toBe('');
+
+    const studentWithBirthday: Student = {
+      id: 's-bday',
+      first_name: 'Tomasz',
+      last_name: 'Kot',
+      phone: '123456789',
+      grade_level: 'Klasa 8',
+      subject: 'Matematyka',
+      default_rate: 8000,
+      default_duration_min: 60,
+      preferred_slots: '',
+      start_date: '2026-01-01',
+      status: 'active',
+      notes: '',
+      birth_day: 15,
+      birth_month: 5,
+      version: 1,
+      created_at: '',
+      updated_at: ''
+    };
+
+    expect(studentWithBirthday.birth_day).toBe(15);
+    expect(studentWithBirthday.birth_month).toBe(5);
+  });
+
+  it('ensures buildCompleteAndPayPayload reuses existing charge and avoids double charge', () => {
+    const lesson: Lesson = {
+      id: 'l-existing-charge',
+      student_id: 's-1',
+      start_at: '2026-11-16T16:00:00',
+      duration_min: 60,
+      status: 'planned',
+      price_snapshot: 16000,
+      subject: 'Matematyka',
+      location: 'student_home',
+      notes: '',
+      version: 1,
+      created_at: '',
+      updated_at: ''
+    };
+
+    const existingCharge = {
+      id: 'c-existing',
+      student_id: 's-1',
+      lesson_id: 'l-existing-charge',
+      amount: 16000,
+      accrual_date: '2026-11-16',
+      charge_type: 'lesson' as const,
+      description: 'Lekcja',
+      version: 1,
+      created_at: '',
+      updated_at: ''
+    };
+
+    const payload = buildCompleteAndPayPayload(
+      lesson,
+      [existingCharge],
+      [],
+      [],
+      '2026-11-16',
+      '2026/005',
+      'blik'
+    );
+
+    // MUST reuse existing charge and NOT create a new charge!
+    expect(payload.newCharge).toBeNull();
+    expect(payload.targetChargeId).toBe('c-existing');
+    expect(payload.newPayment).not.toBeNull();
+    expect(payload.newAllocation).not.toBeNull();
+    expect(payload.newAllocation!.charge_id).toBe('c-existing');
   });
 });

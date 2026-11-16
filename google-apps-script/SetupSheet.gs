@@ -13,7 +13,8 @@ function initializeAllSheets() {
     students: [
       'id', 'first_name', 'last_name', 'phone', 'email', 'grade_level',
       'subject', 'default_rate', 'default_duration_min', 'preferred_slots',
-      'start_date', 'status', 'notes', 'cancel_policy_id', 'version', 'created_at', 'updated_at'
+      'start_date', 'status', 'notes', 'cancel_policy_id', 'version', 'created_at', 'updated_at',
+      'birth_day', 'birth_month'
     ],
     guardians: [
       'id', 'student_id', 'full_name', 'phone', 'email', 'role', 'is_payer',

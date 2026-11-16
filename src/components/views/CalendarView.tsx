@@ -4,7 +4,7 @@ import { Money } from '../../domain/money';
 import { Lesson, UUID } from '../../domain/types';
 import { findLessonConflicts } from '../../domain/series';
 import { getWarsawDateStr } from '../../domain/dateUtils';
-import { IconAlertTriangle, IconCheck, IconPlus, IconX } from '../common/Icons';
+import { IconAlertTriangle, IconCheck, IconPlus, IconX, IconRefresh } from '../common/Icons';
 
 export const CalendarView: React.FC = () => {
   const {
@@ -82,6 +82,77 @@ export const CalendarView: React.FC = () => {
     setShowAddModal(false);
   };
 
+  const handleCopyPreviousWeek = async () => {
+    if (weekDays.length < 7) return;
+
+    const currentMonday = weekDays[0];
+    const prevMonday = new Date(currentMonday);
+    prevMonday.setDate(prevMonday.getDate() - 7);
+    const prevSunday = new Date(currentMonday);
+    prevSunday.setDate(prevSunday.getDate() - 1);
+
+    const prevMonStr = getWarsawDateStr(prevMonday);
+    const prevSunStr = getWarsawDateStr(prevSunday);
+    const curMonStr = getWarsawDateStr(currentMonday);
+    const curSunStr = getWarsawDateStr(weekDays[6]);
+
+    const prevLessons = lessons.filter(l => {
+      const d = l.start_at.slice(0, 10);
+      return d >= prevMonStr && d <= prevSunStr &&
+        l.status !== 'cancelled_student' &&
+        l.status !== 'cancelled_tutor';
+    });
+
+    if (prevLessons.length === 0) {
+      alert(`W poprzednim tygodniu (${prevMonStr} - ${prevSunStr}) nie znaleziono żadnych lekcji do skopiowania.`);
+      return;
+    }
+
+    const confirmMsg = `Znaleziono ${prevLessons.length} ${prevLessons.length === 1 ? 'lekcję' : 'lekcji'} w poprzednim tygodniu (${prevMonStr} - ${prevSunStr}).\n\nCzy chcesz skopiować grafik na bieżący tydzień (${curMonStr} - ${curSunStr})?`;
+    if (!window.confirm(confirmMsg)) {
+      return;
+    }
+
+    let copiedCount = 0;
+    let skippedCount = 0;
+
+    for (const pl of prevLessons) {
+      const prevDate = new Date(pl.start_at);
+      const targetDate = new Date(prevDate);
+      targetDate.setDate(targetDate.getDate() + 7);
+
+      const targetIso = `${getWarsawDateStr(targetDate)}T${pl.start_at.slice(11, 16)}:00`;
+
+      const alreadyExists = lessons.some(
+        existing => existing.student_id === pl.student_id &&
+                    existing.start_at.slice(0, 16) === targetIso.slice(0, 16)
+      );
+
+      if (alreadyExists) {
+        skippedCount++;
+        continue;
+      }
+
+      await createLesson({
+        student_id: pl.student_id,
+        start_at: targetIso,
+        duration_min: pl.duration_min,
+        subject: pl.subject,
+        location: pl.location,
+        notes: pl.notes,
+        price_snapshot: pl.price_snapshot,
+        status: 'planned'
+      });
+      copiedCount++;
+    }
+
+    if (copiedCount > 0) {
+      alert(`Pomyślnie skopiowano ${copiedCount} ${copiedCount === 1 ? 'lekcję' : 'lekcji'} do bieżącego grafiku!${skippedCount > 0 ? ` (${skippedCount} pominięto, bo już istniały).` : ''}`);
+    } else {
+      alert(`Wszystkie lekcje z poprzedniego tygodnia (${skippedCount}) już istnieją w bieżącym grafiku.`);
+    }
+  };
+
   return (
     <div style={{ padding: '16px 16px 8px 16px', maxWidth: 640, margin: '0 auto' }}>
       {/* Calendar Header with View Switcher */}
@@ -150,6 +221,26 @@ export const CalendarView: React.FC = () => {
           Następny
         </button>
       </div>
+
+      {/* Copy Previous Week Schedule Button */}
+      {viewMode === 'week' && (
+        <button
+          onClick={handleCopyPreviousWeek}
+          className="ios-btn ios-btn-secondary"
+          style={{
+            width: '100%',
+            marginBottom: 12,
+            fontSize: 13,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            minHeight: 36
+          }}
+        >
+          <IconRefresh size={15} /> Kopiuj grafik z poprzedniego tygodnia
+        </button>
+      )}
 
       {/* Week View Grid */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

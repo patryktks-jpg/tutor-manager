@@ -252,6 +252,17 @@ function applySingleOperation(ss, op, sheetCache, processedOpsSet) {
     return { op_id: op.op_id, status: 'already_processed' };
   }
 
+  // Idempotencja po lesson_id dla charges (blokada zdublowanego naliczenia za tę samą lekcję)
+  if (op.table === 'charges' && op.action === 'insert' && record.lesson_id && record.charge_type === 'lesson') {
+    var lessonIdIdx = headers.indexOf('lesson_id');
+    var chargeTypeIdx = headers.indexOf('charge_type');
+    for (var cr = 1; cr < data.length; cr++) {
+      if (data[cr][lessonIdIdx] === record.lesson_id && (chargeTypeIdx === -1 || data[cr][chargeTypeIdx] === 'lesson')) {
+        return { op_id: op.op_id, status: 'already_processed' };
+      }
+    }
+  }
+
   // Kontrola wersji
   if (rowIndex > 0 && currentVersion > Number(record.version || 0)) {
     throw new Error('Konflikt wersji: wiersz ma wersję ' + currentVersion + ', dane: ' + record.version);

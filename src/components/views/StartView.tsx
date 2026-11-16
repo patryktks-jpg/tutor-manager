@@ -58,6 +58,14 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
       .sort((a, b) => a.start_at.localeCompare(b.start_at));
   }, [lessons, todayStr]);
 
+  // Students having birthday today
+  const todaysBirthdays = useMemo(() => {
+    const today = new Date();
+    const curDay = today.getDate();
+    const curMonth = today.getMonth() + 1;
+    return students.filter(s => s.birth_day === curDay && s.birth_month === curMonth && s.status === 'active');
+  }, [students]);
+
   // Weekly stats calculated in Europe/Warsaw timezone (PUNKT 1 FIX: no UTC midnight day shifting)
   const weeklyStats = useMemo(() => {
     const { mondayStr: monStr, sundayStr: sunStr } = getWarsawWeekRange(todayStr);
@@ -163,6 +171,32 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
       </div>
 
       <NotificationBanner />
+
+      {/* Birthday Celebration Banner */}
+      {todaysBirthdays.length > 0 && (
+        <div
+          style={{
+            background: 'linear-gradient(135deg, rgba(175, 82, 222, 0.15), rgba(255, 45, 85, 0.15))',
+            border: '1px solid rgba(175, 82, 222, 0.35)',
+            borderRadius: 14,
+            padding: '12px 14px',
+            marginBottom: 16,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10
+          }}
+        >
+          <span style={{ fontSize: 24 }}>🎂</span>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ios-purple)' }}>
+              Urodziny dzisiaj!
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--ios-text-primary)' }}>
+              {todaysBirthdays.map(s => `${s.first_name} ${s.last_name}`).join(', ')} obchodzi dzisiaj urodziny! 🎉
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Rejected Operations Warning Banner (PUNKT 2 FIX) */}
       {rejectedOperations.length > 0 && (
@@ -423,8 +457,7 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                   <button
                     className="ios-btn ios-btn-success"
                     onClick={async () => {
-                      await markLessonCompleted(selectedLesson.id);
-                      await recordLessonPayment(selectedLesson.id, 'blik');
+                      await completeAndPayLesson(selectedLesson.id, 'blik');
                       setShowActionModal(false);
                     }}
                   >

@@ -40,6 +40,8 @@ export interface Student {
   start_date: string;            // yyyy-MM-dd
   status: StudentStatus;
   notes: string;
+  birth_day?: number;            // dzień urodzin (1-31)
+  birth_month?: number;          // miesiąc urodzin (1-12)
   cancel_policy_id?: UUID;
   version: number;
   created_at: string;

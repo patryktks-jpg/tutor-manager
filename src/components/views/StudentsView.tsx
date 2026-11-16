@@ -5,6 +5,27 @@ import { Student, StudentStatus, PaymentMethod } from '../../domain/types';
 import { getStudentFinancialSummary } from '../../domain/allocation';
 import { IconCheck, IconPhone, IconPlus, IconEdit } from '../common/Icons';
 
+export const POLISH_MONTHS = [
+  { value: 1, label: 'stycznia' },
+  { value: 2, label: 'lutego' },
+  { value: 3, label: 'marca' },
+  { value: 4, label: 'kwietnia' },
+  { value: 5, label: 'maja' },
+  { value: 6, label: 'czerwca' },
+  { value: 7, label: 'lipca' },
+  { value: 8, label: 'sierpnia' },
+  { value: 9, label: 'września' },
+  { value: 10, label: 'października' },
+  { value: 11, label: 'listopada' },
+  { value: 12, label: 'grudnia' }
+];
+
+export function formatStudentBirthday(day?: number, month?: number): string {
+  if (!day || !month) return '';
+  const m = POLISH_MONTHS.find(item => item.value === month);
+  return `${day} ${m ? m.label : month}`;
+}
+
 export const StudentsView: React.FC = () => {
   const {
     students,
@@ -37,6 +58,8 @@ export const StudentsView: React.FC = () => {
   const [newRateStr, setNewRateStr] = useState('70,00');
   const [newGuardianName, setNewGuardianName] = useState('');
   const [newGuardianPhone, setNewGuardianPhone] = useState('');
+  const [newBirthDay, setNewBirthDay] = useState('');
+  const [newBirthMonth, setNewBirthMonth] = useState('');
 
   // Form states for editing student
   const [editFirstName, setEditFirstName] = useState('');
@@ -48,6 +71,8 @@ export const StudentsView: React.FC = () => {
   const [editRateStr, setEditRateStr] = useState('');
   const [editNotes, setEditNotes] = useState('');
   const [editStatus, setEditStatus] = useState<StudentStatus>('active');
+  const [editBirthDay, setEditBirthDay] = useState('');
+  const [editBirthMonth, setEditBirthMonth] = useState('');
 
   const openEditModal = (student: Student) => {
     setEditFirstName(student.first_name);
@@ -59,6 +84,8 @@ export const StudentsView: React.FC = () => {
     setEditRateStr(Money.format(student.default_rate, false));
     setEditNotes(student.notes || '');
     setEditStatus(student.status);
+    setEditBirthDay(student.birth_day ? String(student.birth_day) : '');
+    setEditBirthMonth(student.birth_month ? String(student.birth_month) : '');
     setShowEditStudentModal(true);
   };
 
@@ -76,7 +103,9 @@ export const StudentsView: React.FC = () => {
       subject: editSubject.trim(),
       default_rate: rateGrosze > 0 ? rateGrosze : selectedStudent.default_rate,
       notes: editNotes.trim(),
-      status: editStatus
+      status: editStatus,
+      birth_day: editBirthDay ? Number(editBirthDay) : undefined,
+      birth_month: editBirthMonth ? Number(editBirthMonth) : undefined
     };
     await updateStudent(updated);
     setSelectedStudent(updated);
@@ -116,7 +145,9 @@ export const StudentsView: React.FC = () => {
         phone: newPhone,
         email: newEmail,
         grade_level: newGrade,
-        default_rate: rateGrosze
+        default_rate: rateGrosze,
+        birth_day: newBirthDay ? Number(newBirthDay) : undefined,
+        birth_month: newBirthMonth ? Number(newBirthMonth) : undefined
       },
       newGuardianName ? {
         full_name: newGuardianName,
@@ -234,6 +265,11 @@ export const StudentsView: React.FC = () => {
                 <div style={{ fontSize: 13, color: 'var(--ios-text-secondary)', marginBottom: 2 }}>
                   {student.grade_level} • Stawka: {Money.format(student.default_rate)}
                 </div>
+                {student.birth_day && student.birth_month && (
+                  <div style={{ fontSize: 12, color: 'var(--ios-purple)', marginBottom: 2 }}>
+                    🎂 Urodziny: {formatStudentBirthday(student.birth_day, student.birth_month)}
+                  </div>
+                )}
                 {studentGuardians.length > 0 && (
                   <div style={{ fontSize: 12, color: 'var(--ios-text-secondary)' }}>
                     Opiekun: {studentGuardians[0].full_name} ({studentGuardians[0].phone})
@@ -278,6 +314,11 @@ export const StudentsView: React.FC = () => {
                 </h2>
                 <div style={{ fontSize: 13, color: 'var(--ios-text-secondary)' }}>
                   {selectedStudent.grade_level} • {selectedStudent.subject}
+                  {selectedStudent.birth_day && selectedStudent.birth_month && (
+                    <span style={{ color: 'var(--ios-purple)', marginLeft: 8 }}>
+                      • 🎂 {formatStudentBirthday(selectedStudent.birth_day, selectedStudent.birth_month)}
+                    </span>
+                  )}
                 </div>
               </div>
 
@@ -528,6 +569,39 @@ export const StudentsView: React.FC = () => {
 
               <div style={{ borderTop: '1px solid var(--ios-separator)', paddingTop: 8, marginTop: 4 }}>
                 <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--ios-text-secondary)' }}>
+                  🎂 Urodziny ucznia (opcjonalnie)
+                </span>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 10, marginTop: 6 }}>
+                  <div>
+                    <label style={{ fontSize: 12, fontWeight: 600 }}>Dzień</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="31"
+                      placeholder="np. 15"
+                      className="ios-input"
+                      value={newBirthDay}
+                      onChange={e => setNewBirthDay(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 12, fontWeight: 600 }}>Miesiąc</label>
+                    <select
+                      className="ios-input"
+                      value={newBirthMonth}
+                      onChange={e => setNewBirthMonth(e.target.value)}
+                    >
+                      <option value="">Wybierz miesiąc...</option>
+                      {POLISH_MONTHS.map(m => (
+                        <option key={m.value} value={m.value}>{m.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ borderTop: '1px solid var(--ios-separator)', paddingTop: 8, marginTop: 4 }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--ios-text-secondary)' }}>
                   Opiekun prawny (jeśli uczeń jest niepełnoletni)
                 </span>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 6 }}>
@@ -654,6 +728,39 @@ export const StudentsView: React.FC = () => {
                     value={editEmail}
                     onChange={e => setEditEmail(e.target.value)}
                   />
+                </div>
+              </div>
+
+              <div style={{ borderTop: '1px solid var(--ios-separator)', paddingTop: 8, marginTop: 4 }}>
+                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--ios-text-secondary)' }}>
+                  🎂 Urodziny ucznia (opcjonalnie)
+                </span>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 2fr', gap: 10, marginTop: 6 }}>
+                  <div>
+                    <label style={{ fontSize: 12, fontWeight: 600 }}>Dzień</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="31"
+                      placeholder="np. 15"
+                      className="ios-input"
+                      value={editBirthDay}
+                      onChange={e => setEditBirthDay(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label style={{ fontSize: 12, fontWeight: 600 }}>Miesiąc</label>
+                    <select
+                      className="ios-input"
+                      value={editBirthMonth}
+                      onChange={e => setEditBirthMonth(e.target.value)}
+                    >
+                      <option value="">Wybierz miesiąc...</option>
+                      {POLISH_MONTHS.map(m => (
+                        <option key={m.value} value={m.value}>{m.label}</option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
               </div>
 
