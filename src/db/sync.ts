@@ -370,3 +370,100 @@ export async function forcePushAllData(
     };
   }
 }
+
+/**
+ * Pobiera czyste dane bezpośrednio z Arkusza Google, usuwając lokalne ewentualne duplikaty.
+ * Gwarantuje, że stan aplikacji w telefonie jest dokładnie taki sam jak w Arkuszu Google.
+ */
+export async function pullCleanFromGas(
+  settings: Settings,
+  onProgress?: (msg: string) => void
+): Promise<SyncResult> {
+  const url = settings.gas_web_app_url;
+  const token = settings.gas_secret_token;
+
+  if (!url) {
+    return { success: false, pushedCount: 0, pulledCount: 0, rejectedCount: 0, message: 'Brak skonfigurowanego URL Arkusza Google.' };
+  }
+
+  try {
+    onProgress?.('Pobieranie czystych danych z Arkusza Google...');
+    const pullUrl = `${url}?action=pull&since=1970-01-01T00:00:00Z&token=${encodeURIComponent(token || '')}`;
+    const pullRes = await fetch(pullUrl, { method: 'GET' });
+    const pullJson = await pullRes.json();
+
+    if (pullJson.status === 'ok' && pullJson.data) {
+      const db = await IDBManager.getDB();
+      const tablesToClean = [
+        'charges',
+        'payments',
+        'payment_allocations',
+        'income_entries',
+        'lessons',
+        'students',
+        'guardians',
+        'rate_history'
+      ] as const;
+
+      for (const table of tablesToClean) {
+        // Clear local store
+        const clearTx = db.transaction(table, 'readwrite');
+        clearTx.objectStore(table).clear();
+        await new Promise((resolve, reject) => {
+          clearTx.oncomplete = () => resolve(true);
+          clearTx.onerror = () => reject(clearTx.error);
+        });
+
+        // Populate with rows from Google Sheets
+        const rows = pullJson.data[table];
+        if (Array.isArray(rows) && rows.length > 0) {
+          const writeTx = db.transaction(table, 'readwrite');
+          const store = writeTx.objectStore(table);
+          const seenIds = new Set<string>();
+          for (const row of rows) {
+            if (row.id && !seenIds.has(row.id)) {
+              seenIds.add(row.id);
+              store.put(row);
+            }
+          }
+          await new Promise((resolve, reject) => {
+            writeTx.oncomplete = () => resolve(true);
+            writeTx.onerror = () => reject(writeTx.error);
+          });
+        }
+      }
+
+      // Clear offline queue
+      const qTx = db.transaction('offline_queue', 'readwrite');
+      qTx.objectStore('offline_queue').clear();
+      await new Promise((resolve, reject) => {
+        qTx.oncomplete = () => resolve(true);
+        qTx.onerror = () => reject(qTx.error);
+      });
+
+      return {
+        success: true,
+        pushedCount: 0,
+        pulledCount: 1,
+        rejectedCount: 0,
+        message: 'Baza danych została zsynchronizowana z Arkuszem Google! Lokalne duplikaty usunięte.'
+      };
+    }
+
+    return {
+      success: false,
+      pushedCount: 0,
+      pulledCount: 0,
+      rejectedCount: 0,
+      message: pullJson.message || 'Błąd pobierania danych'
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      pushedCount: 0,
+      pulledCount: 0,
+      rejectedCount: 0,
+      message: `Błąd sieci: ${err.message}`
+    };
+  }
+}

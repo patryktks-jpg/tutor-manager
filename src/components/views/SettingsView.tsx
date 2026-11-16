@@ -22,6 +22,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
     testConnection,
     syncNow,
     forcePushAll,
+    pullCleanFromGas,
     syncStatus,
     exportBackup,
     restoreBackup,
@@ -331,6 +332,19 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
               style={{ width: '100%', marginTop: 8, fontSize: 13 }}
             >
               <IconDownload size={16} style={{ transform: 'rotate(180deg)' }} /> Wyślij całą bazę do Arkusza Google
+            </button>
+            <button
+              onClick={async () => {
+                if (confirm('Czy chcesz pobrać czyste dane z Twojego Arkusza Google? To usunie lokalne duplikaty i naprawi sumy finansowe.')) {
+                  const res = await pullCleanFromGas();
+                  alert(res.message);
+                }
+              }}
+              disabled={syncStatus.isSyncing}
+              className="ios-btn ios-btn-secondary"
+              style={{ width: '100%', marginTop: 8, fontSize: 13, color: 'var(--ios-blue)', fontWeight: 600 }}
+            >
+              <IconRefresh size={16} /> Pobierz czyste dane z Arkusza (Napraw sumy)
             </button>
             {settings.last_sync_at && (
               <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)', marginTop: 4, textAlign: 'center' }}>

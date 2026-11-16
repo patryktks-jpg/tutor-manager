@@ -117,12 +117,6 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
     return getChargesBalance(charges, paymentAllocations);
   }, [charges, paymentAllocations]);
 
-  const handleSwipeComplete = async (lesson: Lesson) => {
-    // SPECYFIKACJA A1: Jedno kliknięcie / swipe po lekcji
-    // („zrealizowana + zapłacona BLIK-iem”) aktualizuje grafik, saldo ucznia, ewidencję i pasek limitu atomowo!
-    await completeAndPayLesson(lesson.id, 'blik');
-  };
-
   const handleSwipeCancel = async (lesson: Lesson) => {
     await updateLessonStatus(lesson.id, 'cancelled_student');
   };
@@ -257,9 +251,9 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
             return (
               <SwipeableCard
                 key={lesson.id}
-                rightLabel="Zrealizowana + BLIK"
+                rightLabel="Zrealizuj"
                 leftLabel="Odwołaj"
-                onSwipeRight={() => !isCompleted && handleSwipeComplete(lesson)}
+                onSwipeRight={() => !isCompleted && openActionMenu(lesson)}
                 onSwipeLeft={() => !isCompleted && !isCancelled && handleSwipeCancel(lesson)}
               >
                 <div
@@ -314,7 +308,7 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleSwipeComplete(lesson);
+                          openActionMenu(lesson);
                         }}
                         className="ios-btn ios-btn-primary"
                         style={{ padding: '4px 10px', fontSize: 12, minHeight: 32, marginTop: 4 }}
@@ -332,7 +326,7 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                         className="ios-btn ios-btn-success"
                         style={{ padding: '4px 10px', fontSize: 12, minHeight: 32, marginTop: 4 }}
                       >
-                        Zapłać BLIK
+                        + Wpłata
                       </button>
                     )}
                   </div>
@@ -453,27 +447,57 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {selectedLesson.status !== 'completed' && (
-                <>
-                  <button
-                    className="ios-btn ios-btn-success"
-                    onClick={async () => {
-                      await completeAndPayLesson(selectedLesson.id, 'blik');
-                      setShowActionModal(false);
-                    }}
-                  >
-                    <IconCheck size={18} /> Zrealizowana + Zapłacona BLIK (A1)
-                  </button>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8 }}>
+                    Wybierz formę płatności za lekcję:
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 10 }}>
+                    <button
+                      className="ios-btn ios-btn-success"
+                      style={{ padding: '10px 4px', fontSize: 13, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}
+                      onClick={async () => {
+                        await completeAndPayLesson(selectedLesson.id, 'blik');
+                        setShowActionModal(false);
+                      }}
+                    >
+                      <span style={{ fontWeight: 800 }}>BLIK</span>
+                      <span style={{ fontSize: 10, opacity: 0.85 }}>Zapłacona</span>
+                    </button>
+                    <button
+                      className="ios-btn ios-btn-primary"
+                      style={{ padding: '10px 4px', fontSize: 13, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}
+                      onClick={async () => {
+                        await completeAndPayLesson(selectedLesson.id, 'przelew');
+                        setShowActionModal(false);
+                      }}
+                    >
+                      <span style={{ fontWeight: 800 }}>Przelew</span>
+                      <span style={{ fontSize: 10, opacity: 0.85 }}>Zapłacona</span>
+                    </button>
+                    <button
+                      className="ios-btn ios-btn-secondary"
+                      style={{ padding: '10px 4px', fontSize: 13, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}
+                      onClick={async () => {
+                        await completeAndPayLesson(selectedLesson.id, 'gotowka');
+                        setShowActionModal(false);
+                      }}
+                    >
+                      <span style={{ fontWeight: 800 }}>Gotówka</span>
+                      <span style={{ fontSize: 10, opacity: 0.85 }}>Zapłacona</span>
+                    </button>
+                  </div>
 
                   <button
-                    className="ios-btn ios-btn-primary"
+                    className="ios-btn ios-btn-secondary"
+                    style={{ width: '100%', fontSize: 13 }}
                     onClick={async () => {
                       await markLessonCompleted(selectedLesson.id);
                       setShowActionModal(false);
                     }}
                   >
-                    <IconCheck size={18} /> Zrealizowana (Do zapłaty)
+                    <IconCheck size={16} /> Zrealizowana (Do zapłaty później)
                   </button>
-                </>
+                </div>
               )}
 
               {selectedLesson.status === 'completed' && (() => {

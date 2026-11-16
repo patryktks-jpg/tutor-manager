@@ -2,11 +2,12 @@ import React, { useState, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Money } from '../../domain/money';
 import { getChargesBalance } from '../../domain/allocation';
-import { IconDownload } from '../common/Icons';
+import { IconDownload, IconX } from '../common/Icons';
 
 export const FinanceView: React.FC = () => {
-  const { charges, payments, paymentAllocations, incomeEntries, students } = useApp();
+  const { charges, payments, paymentAllocations, incomeEntries, students, deleteCharge } = useApp();
   const [activeSubTab, setActiveSubTab] = useState<'charges' | 'payments' | 'register'>('charges');
+  const [chargesFilter, setChargesFilter] = useState<'all' | 'open'>('all');
   const [periodFilter, setPeriodFilter] = useState('2026-11');
 
   // Charges balance & age of debt
@@ -112,65 +113,148 @@ export const FinanceView: React.FC = () => {
       {/* TAB 1: Należności / Zaległości */}
       {activeSubTab === 'charges' && (
         <div>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <h2 style={{ fontSize: 16, fontWeight: 700 }}>Otwarte należności ({openCharges.length})</h2>
-            <span style={{ fontSize: 12, color: 'var(--ios-text-secondary)' }}>Sortowane od najstarszych</span>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+            <button
+              onClick={() => setChargesFilter('all')}
+              className={`ios-btn ${chargesFilter === 'all' ? 'ios-btn-primary' : 'ios-btn-secondary'}`}
+              style={{ padding: '6px 14px', fontSize: 13, minHeight: 32 }}
+            >
+              Wszystkie ({charges.length})
+            </button>
+            <button
+              onClick={() => setChargesFilter('open')}
+              className={`ios-btn ${chargesFilter === 'open' ? 'ios-btn-danger' : 'ios-btn-secondary'}`}
+              style={{ padding: '6px 14px', fontSize: 13, minHeight: 32 }}
+            >
+              Do zapłaty ({openCharges.length})
+            </button>
           </div>
 
-          {openCharges.length === 0 ? (
-            <div className="ios-card" style={{ textAlign: 'center', padding: '24px 16px' }}>
-              <div style={{ fontWeight: 600, color: 'var(--ios-green)' }}>Brak zaległości!</div>
-              <div style={{ fontSize: 13, color: 'var(--ios-text-secondary)', marginTop: 4 }}>
-                Wszyscy uczniowie mają uregulowane należności.
+          {chargesFilter === 'open' ? (
+            openCharges.length === 0 ? (
+              <div className="ios-card" style={{ textAlign: 'center', padding: '24px 16px' }}>
+                <div style={{ fontWeight: 600, color: 'var(--ios-green)' }}>Brak zaległości!</div>
+                <div style={{ fontSize: 13, color: 'var(--ios-text-secondary)', marginTop: 4 }}>
+                  Wszyscy uczniowie mają uregulowane należności.
+                </div>
               </div>
-            </div>
-          ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {openCharges.map(item => {
-                const student = students.find(s => s.id === item.charge.student_id);
-                // Days since accrual
-                const daysOld = Math.floor(
-                  (new Date().getTime() - new Date(item.charge.accrual_date).getTime()) / (1000 * 60 * 60 * 24)
-                );
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {openCharges.map(item => {
+                  const student = students.find(s => s.id === item.charge.student_id);
+                  const daysOld = Math.floor(
+                    (new Date().getTime() - new Date(item.charge.accrual_date).getTime()) / (1000 * 60 * 60 * 24)
+                  );
 
-                return (
-                  <div key={item.charge.id} className="ios-card" style={{ marginBottom: 0 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                      <div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                          <span style={{ fontWeight: 700, fontSize: 15 }}>
-                            {student ? `${student.first_name} ${student.last_name}` : 'Uczeń'}
-                          </span>
-                          <span
-                            className="ios-badge"
-                            style={{
-                              backgroundColor: daysOld > 14 ? 'rgba(255,59,48,0.15)' : 'rgba(255,149,0,0.15)',
-                              color: daysOld > 14 ? 'var(--ios-red)' : 'var(--ios-amber)',
-                              fontSize: 10
-                            }}
-                          >
-                            {daysOld} dni temu
-                          </span>
-                        </div>
-                        <div style={{ fontSize: 13, color: 'var(--ios-text-secondary)', marginTop: 2 }}>
-                          Termin: {item.charge.accrual_date} • {item.charge.description || 'Lekcja'}
-                        </div>
-                      </div>
-
-                      <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--ios-red)' }}>
-                          {Money.format(item.remainingAmount)}
-                        </div>
-                        {item.allocatedAmount > 0 && (
-                          <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)' }}>
-                            z {Money.format(item.charge.amount)} (częściowo)
+                  return (
+                    <div key={item.charge.id} className="ios-card" style={{ marginBottom: 0 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ fontWeight: 700, fontSize: 15 }}>
+                              {student ? `${student.first_name} ${student.last_name}` : 'Uczeń'}
+                            </span>
+                            <span
+                              className="ios-badge"
+                              style={{
+                                backgroundColor: daysOld > 14 ? 'rgba(255,59,48,0.15)' : 'rgba(255,149,0,0.15)',
+                                color: daysOld > 14 ? 'var(--ios-red)' : 'var(--ios-amber)',
+                                fontSize: 10
+                              }}
+                            >
+                              {daysOld} dni temu
+                            </span>
                           </div>
-                        )}
+                          <div style={{ fontSize: 13, color: 'var(--ios-text-secondary)', marginTop: 2 }}>
+                            Termin: {item.charge.accrual_date} • {item.charge.description || 'Lekcja'}
+                          </div>
+                        </div>
+
+                        <div style={{ textAlign: 'right' }}>
+                          <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--ios-red)' }}>
+                            {Money.format(item.remainingAmount)}
+                          </div>
+                          {item.allocatedAmount > 0 && (
+                            <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)' }}>
+                              z {Money.format(item.charge.amount)} (częściowo)
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                );
-              })}
+                  );
+                })}
+              </div>
+            )
+          ) : (
+            /* ALL CHARGES LIST */
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {charges
+                .slice()
+                .sort((a, b) => b.accrual_date.localeCompare(a.accrual_date) || b.created_at.localeCompare(a.created_at))
+                .map(c => {
+                  const student = students.find(s => s.id === c.student_id);
+                  const allocated = paymentAllocations
+                    .filter(a => a.charge_id === c.id)
+                    .reduce((sum, a) => sum + a.amount, 0);
+                  const isFullyPaid = allocated >= c.amount;
+
+                  return (
+                    <div key={c.id} className="ios-card" style={{ marginBottom: 0, padding: 12 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ fontWeight: 700, fontSize: 15 }}>
+                              {student ? `${student.first_name} ${student.last_name}` : 'Uczeń'}
+                            </span>
+                            {isFullyPaid ? (
+                              <span className="ios-badge ios-badge-green" style={{ fontSize: 10 }}>Opłacona</span>
+                            ) : (
+                              <span className="ios-badge ios-badge-amber" style={{ fontSize: 10 }}>Do zapłaty</span>
+                            )}
+                          </div>
+                          <div style={{ fontSize: 12, color: 'var(--ios-text-secondary)', marginTop: 2 }}>
+                            {c.accrual_date} • {c.description || 'Lekcja'}
+                          </div>
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                          <div style={{ textAlign: 'right' }}>
+                            <div style={{ fontSize: 16, fontWeight: 700 }}>
+                              {Money.format(c.amount)}
+                            </div>
+                            <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)' }}>
+                              {isFullyPaid ? 'Rozliczona' : `Pozostało: ${Money.format(c.amount - allocated)}`}
+                            </div>
+                          </div>
+
+                          <button
+                            onClick={() => {
+                              if (confirm(`Czy na pewno chcesz usunąć to naliczenie (${Money.format(c.amount)})?`)) {
+                                deleteCharge(c.id);
+                              }
+                            }}
+                            title="Usuń naliczenie"
+                            style={{
+                              border: 'none',
+                              background: 'rgba(255,59,48,0.1)',
+                              color: 'var(--ios-red)',
+                              borderRadius: 8,
+                              width: 32,
+                              height: 32,
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              cursor: 'pointer'
+                            }}
+                          >
+                            <IconX size={16} />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
             </div>
           )}
         </div>

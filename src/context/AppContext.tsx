@@ -23,7 +23,7 @@ import {
 import { generateUUID, hashPin } from '../domain/crypto';
 import { getWarsawDateStr } from '../domain/dateUtils';
 import { IDBManager } from '../db/idb';
-import { syncWithGas, testGasConnection, forcePushAllData, exportReportViaGas, syncLessonToCalendarViaGas, SyncResult } from '../db/sync';
+import { syncWithGas, testGasConnection, forcePushAllData, pullCleanFromGas as pullCleanFromGasSync, exportReportViaGas, syncLessonToCalendarViaGas, SyncResult } from '../db/sync';
 import { calculateQuarterLimitStatus, LimitStatus } from '../domain/limit';
 import { proposeFifoAllocation } from '../domain/allocation';
 import { assessCancellation, DEFAULT_CANCEL_POLICY } from '../domain/cancelPolicy';
@@ -87,6 +87,8 @@ interface AppContextValue {
   syncStatus: { isSyncing: boolean; message: string; lastResult?: SyncResult };
   syncNow: () => Promise<SyncResult>;
   forcePushAll: () => Promise<SyncResult>;
+  pullCleanFromGas: () => Promise<SyncResult>;
+  deleteCharge: (chargeId: UUID) => Promise<void>;
   testConnection: (url: string, token: string) => Promise<{ success: boolean; message: string }>;
   exportBackup: () => Promise<string>;
   restoreBackup: (jsonStr: string) => Promise<void>;
@@ -151,18 +153,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     // Automatyczna deduplikacja omyłkowych podwójnych naliczeń za tę samą lekcję (FIX na 320 zł -> 160 zł)
     const seenLessonCharges = new Set<string>();
+    const seenGenericCharges = new Set<string>();
     const duplicateChargeIds: string[] = [];
     const cleanCharges: Charge[] = [];
 
     for (const c of data.charges) {
-      if (c.charge_type === 'lesson' && c.lesson_id) {
-        if (seenLessonCharges.has(c.lesson_id)) {
-          duplicateChargeIds.push(c.id);
-        } else {
-          seenLessonCharges.add(c.lesson_id);
-          cleanCharges.push(c);
-        }
+      const lessonKey = c.charge_type === 'lesson' && c.lesson_id ? c.lesson_id : null;
+      const genericKey = `${c.student_id}|${c.accrual_date}|${c.amount}|${c.description}`;
+
+      let isDuplicate = false;
+      if (lessonKey && seenLessonCharges.has(lessonKey)) {
+        isDuplicate = true;
+      } else if (seenGenericCharges.has(genericKey)) {
+        isDuplicate = true;
+      }
+
+      if (isDuplicate) {
+        duplicateChargeIds.push(c.id);
       } else {
+        if (lessonKey) seenLessonCharges.add(lessonKey);
+        seenGenericCharges.add(genericKey);
         cleanCharges.push(c);
       }
     }
@@ -977,6 +987,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [settings, refreshFromIDB]);
 
+  const pullCleanFromGas = useCallback(async (): Promise<SyncResult> => {
+    setSyncStatus({ isSyncing: true, message: 'Pobieranie czystych danych z Arkusza Google...' });
+    try {
+      const res = await pullCleanFromGasSync(settings, (msg) => {
+        setSyncStatus(s => ({ ...s, message: msg }));
+      });
+      setSyncStatus({ isSyncing: false, message: res.message, lastResult: res });
+      await refreshFromIDB();
+      return res;
+    } catch (err: any) {
+      const errRes: SyncResult = {
+        success: false,
+        pushedCount: 0,
+        pulledCount: 0,
+        rejectedCount: 0,
+        message: 'Błąd synchronizacji',
+        error: err.message
+      };
+      setSyncStatus({ isSyncing: false, message: err.message, lastResult: errRes });
+      return errRes;
+    }
+  }, [settings, refreshFromIDB]);
+
+  const deleteCharge = useCallback(async (chargeId: UUID) => {
+    await IDBManager.delete('charges', chargeId);
+    setCharges(prev => prev.filter(c => c.id !== chargeId));
+  }, []);
+
   const testConnection = useCallback(async (url: string, token: string) => {
     return await testGasConnection(url, token);
   }, []);
@@ -1075,6 +1113,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     syncStatus,
     syncNow,
     forcePushAll,
+    pullCleanFromGas,
+    deleteCharge,
     testConnection,
     exportBackup,
     restoreBackup,
@@ -1129,6 +1169,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     syncStatus,
     syncNow,
     forcePushAll,
+    pullCleanFromGas,
+    deleteCharge,
     testConnection,
     exportBackup,
     restoreBackup,
