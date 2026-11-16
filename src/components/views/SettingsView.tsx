@@ -3,7 +3,7 @@ import { useApp } from '../../context/AppContext';
 import { Money } from '../../domain/money';
 import { PaymentMethod } from '../../domain/types';
 import { getWarsawDateStr } from '../../domain/dateUtils';
-import { IconCheck, IconLock, IconRefresh } from '../common/Icons';
+import { IconCheck, IconLock, IconRefresh, IconDownload } from '../common/Icons';
 
 interface SettingsViewProps {
   onClose: () => void;
@@ -21,6 +21,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
     setAppPin,
     testConnection,
     syncNow,
+    forcePushAll,
     syncStatus,
     exportBackup,
     restoreBackup,
@@ -319,6 +320,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
               style={{ width: '100%' }}
             >
               <IconRefresh size={16} /> Synchronizuj teraz
+            </button>
+            <button
+              onClick={async () => {
+                const res = await forcePushAll();
+                alert(res.message);
+              }}
+              disabled={syncStatus.isSyncing}
+              className="ios-btn ios-btn-secondary"
+              style={{ width: '100%', marginTop: 8, fontSize: 13 }}
+            >
+              <IconDownload size={16} style={{ transform: 'rotate(180deg)' }} /> Wyślij całą bazę do Arkusza Google
             </button>
             {settings.last_sync_at && (
               <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)', marginTop: 4, textAlign: 'center' }}>

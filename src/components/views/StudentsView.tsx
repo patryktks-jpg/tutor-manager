@@ -1,9 +1,9 @@
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Money } from '../../domain/money';
-import { Student, PaymentMethod } from '../../domain/types';
+import { Student, StudentStatus, PaymentMethod } from '../../domain/types';
 import { getStudentFinancialSummary } from '../../domain/allocation';
-import { IconCheck, IconPhone, IconPlus } from '../common/Icons';
+import { IconCheck, IconPhone, IconPlus, IconEdit } from '../common/Icons';
 
 export const StudentsView: React.FC = () => {
   const {
@@ -13,6 +13,7 @@ export const StudentsView: React.FC = () => {
     charges,
     payments,
     createStudent,
+    updateStudent,
     anonymizeStudent,
     recordPayment
   } = useApp();
@@ -24,6 +25,7 @@ export const StudentsView: React.FC = () => {
 
   // Modals
   const [showAddStudentModal, setShowAddStudentModal] = useState(false);
+  const [showEditStudentModal, setShowEditStudentModal] = useState(false);
   const [showPayModal, setShowPayModal] = useState(false);
 
   // Form states for adding new student
@@ -35,6 +37,51 @@ export const StudentsView: React.FC = () => {
   const [newRateStr, setNewRateStr] = useState('70,00');
   const [newGuardianName, setNewGuardianName] = useState('');
   const [newGuardianPhone, setNewGuardianPhone] = useState('');
+
+  // Form states for editing student
+  const [editFirstName, setEditFirstName] = useState('');
+  const [editLastName, setEditLastName] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editGrade, setEditGrade] = useState('');
+  const [editSubject, setEditSubject] = useState('');
+  const [editRateStr, setEditRateStr] = useState('');
+  const [editNotes, setEditNotes] = useState('');
+  const [editStatus, setEditStatus] = useState<StudentStatus>('active');
+
+  const openEditModal = (student: Student) => {
+    setEditFirstName(student.first_name);
+    setEditLastName(student.last_name);
+    setEditPhone(student.phone || '');
+    setEditEmail(student.email || '');
+    setEditGrade(student.grade_level || '');
+    setEditSubject(student.subject || 'Matematyka');
+    setEditRateStr(Money.format(student.default_rate, false));
+    setEditNotes(student.notes || '');
+    setEditStatus(student.status);
+    setShowEditStudentModal(true);
+  };
+
+  const handleEditStudentSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedStudent) return;
+    const rateGrosze = Money.parse(editRateStr);
+    const updated: Student = {
+      ...selectedStudent,
+      first_name: editFirstName.trim(),
+      last_name: editLastName.trim(),
+      phone: editPhone.trim(),
+      email: editEmail.trim(),
+      grade_level: editGrade.trim(),
+      subject: editSubject.trim(),
+      default_rate: rateGrosze > 0 ? rateGrosze : selectedStudent.default_rate,
+      notes: editNotes.trim(),
+      status: editStatus
+    };
+    await updateStudent(updated);
+    setSelectedStudent(updated);
+    setShowEditStudentModal(false);
+  };
 
   // Payment form state
   const [payAmountStr, setPayAmountStr] = useState('70,00');
@@ -234,16 +281,25 @@ export const StudentsView: React.FC = () => {
                 </div>
               </div>
 
-              <button
-                onClick={() => {
-                  setPayAmountStr(Money.format(selectedStudent.default_rate, false));
-                  setShowPayModal(true);
-                }}
-                className="ios-btn ios-btn-success"
-                style={{ padding: '6px 12px', fontSize: 13, minHeight: 34 }}
-              >
-                + Wpłata
-              </button>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <button
+                  onClick={() => openEditModal(selectedStudent)}
+                  className="ios-btn ios-btn-secondary"
+                  style={{ padding: '6px 12px', fontSize: 13, minHeight: 34 }}
+                >
+                  <IconEdit size={14} /> Edytuj
+                </button>
+                <button
+                  onClick={() => {
+                    setPayAmountStr(Money.format(selectedStudent.default_rate, false));
+                    setShowPayModal(true);
+                  }}
+                  className="ios-btn ios-btn-success"
+                  style={{ padding: '6px 12px', fontSize: 13, minHeight: 34 }}
+                >
+                  + Wpłata
+                </button>
+              </div>
             </div>
 
             {/* Quick Contact Buttons */}
@@ -500,6 +556,131 @@ export const StudentsView: React.FC = () => {
               <button type="submit" className="ios-btn ios-btn-primary" style={{ marginTop: 8 }}>
                 Zapisz ucznia
               </button>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Student Modal */}
+      {showEditStudentModal && selectedStudent && (
+        <div className="ios-modal-overlay" onClick={() => setShowEditStudentModal(false)}>
+          <div className="ios-modal-content" onClick={e => e.stopPropagation()}>
+            <div className="ios-modal-grabber" />
+            <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 12 }}>Edytuj dane ucznia</h3>
+            <form onSubmit={handleEditStudentSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600 }}>Imię</label>
+                  <input
+                    type="text"
+                    required
+                    className="ios-input"
+                    value={editFirstName}
+                    onChange={e => setEditFirstName(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600 }}>Nazwisko</label>
+                  <input
+                    type="text"
+                    required
+                    className="ios-input"
+                    value={editLastName}
+                    onChange={e => setEditLastName(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600 }}>Klasa / Poziom</label>
+                  <input
+                    type="text"
+                    className="ios-input"
+                    value={editGrade}
+                    onChange={e => setEditGrade(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600 }}>Stawka za lekcję (zł)</label>
+                  <input
+                    type="text"
+                    className="ios-input"
+                    value={editRateStr}
+                    onChange={e => setEditRateStr(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600 }}>Przedmiot</label>
+                  <input
+                    type="text"
+                    className="ios-input"
+                    value={editSubject}
+                    onChange={e => setEditSubject(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600 }}>Status</label>
+                  <select
+                    className="ios-input"
+                    value={editStatus}
+                    onChange={e => setEditStatus(e.target.value as StudentStatus)}
+                  >
+                    <option value="active">Aktywny</option>
+                    <option value="paused">Zawieszony</option>
+                    <option value="archived">Zarchiwizowany</option>
+                  </select>
+                </div>
+              </div>
+
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600 }}>Telefon ucznia</label>
+                  <input
+                    type="tel"
+                    className="ios-input"
+                    value={editPhone}
+                    onChange={e => setEditPhone(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label style={{ fontSize: 12, fontWeight: 600 }}>E-mail</label>
+                  <input
+                    type="email"
+                    className="ios-input"
+                    value={editEmail}
+                    onChange={e => setEditEmail(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label style={{ fontSize: 12, fontWeight: 600 }}>Notatki / Uwagi</label>
+                <textarea
+                  className="ios-input"
+                  rows={2}
+                  value={editNotes}
+                  onChange={e => setEditNotes(e.target.value)}
+                  placeholder="np. przygotowanie do matury rozszerzonej..."
+                />
+              </div>
+
+              <div style={{ display: 'flex', gap: 8, marginTop: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => setShowEditStudentModal(false)}
+                  className="ios-btn ios-btn-secondary"
+                  style={{ flex: 1 }}
+                >
+                  Anuluj
+                </button>
+                <button type="submit" className="ios-btn ios-btn-primary" style={{ flex: 1 }}>
+                  Zapisz zmiany
+                </button>
+              </div>
             </form>
           </div>
         </div>

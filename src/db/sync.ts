@@ -276,3 +276,97 @@ export async function syncLessonToCalendarViaGas(
     return { success: false, message: err.message };
   }
 }
+
+/**
+ * Wymusza wysłanie wszystkich lokalnych rekordów z telefonu do Arkusza Google.
+ * Dzięki idempotencji w backendzie Google Apps Script (blokada duplikacji po record.id),
+ * istniejące wiersze nie są duplikowane, a brakujące są bezpiecznie dopisywane.
+ */
+export async function forcePushAllData(
+  settings: Settings,
+  onProgress?: (msg: string) => void
+): Promise<SyncResult> {
+  const url = settings.gas_web_app_url;
+  const token = settings.gas_secret_token;
+
+  if (!url) {
+    return { success: false, pushedCount: 0, pulledCount: 0, rejectedCount: 0, message: 'Brak skonfigurowanego URL Arkusza Google.' };
+  }
+
+  try {
+    const db = await IDBManager.getDB();
+    const tables = [
+      'students',
+      'guardians',
+      'rate_history',
+      'lesson_series',
+      'lessons',
+      'lesson_events',
+      'charges',
+      'payments',
+      'payment_allocations',
+      'packages',
+      'income_entries',
+      'legal_params',
+      'periods',
+      'settings'
+    ] as const;
+
+    const operations: any[] = [];
+    for (const table of tables) {
+      const records = await IDBManager.getAll<any>(db, table);
+      for (const record of records) {
+        operations.push({
+          op_id: `force-${table}-${record.id}-${Date.now().toString(36)}`,
+          table,
+          action: 'insert',
+          record: sanitizeRecordForSheets(table, record),
+          timestamp: new Date().toISOString()
+        });
+      }
+    }
+
+    if (operations.length === 0) {
+      return { success: true, pushedCount: 0, pulledCount: 0, rejectedCount: 0, message: 'Baza na telefonie jest pusta.' };
+    }
+
+    onProgress?.(`Wysyłanie ${operations.length} rekordów do Arkusza Google...`);
+
+    const pushRes = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify({
+        action: 'push_batch',
+        token,
+        operations
+      })
+    });
+
+    const pushJson = await pushRes.json();
+    if (pushJson.status === 'ok') {
+      return {
+        success: true,
+        pushedCount: operations.length,
+        pulledCount: 0,
+        rejectedCount: 0,
+        message: `Pomyślnie zsynchronizowano całą bazę (${operations.length} rekordów)!`
+      };
+    }
+
+    return {
+      success: false,
+      pushedCount: 0,
+      pulledCount: 0,
+      rejectedCount: 0,
+      message: pushJson.message || 'Błąd wysyłania bazy do Arkusza.'
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      pushedCount: 0,
+      pulledCount: 0,
+      rejectedCount: 0,
+      message: `Błąd sieci: ${err.message}`
+    };
+  }
+}

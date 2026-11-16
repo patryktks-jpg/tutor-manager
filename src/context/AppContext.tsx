@@ -23,7 +23,7 @@ import {
 import { generateUUID, hashPin } from '../domain/crypto';
 import { getWarsawDateStr } from '../domain/dateUtils';
 import { IDBManager } from '../db/idb';
-import { syncWithGas, testGasConnection, exportReportViaGas, syncLessonToCalendarViaGas, SyncResult } from '../db/sync';
+import { syncWithGas, testGasConnection, forcePushAllData, exportReportViaGas, syncLessonToCalendarViaGas, SyncResult } from '../db/sync';
 import { calculateQuarterLimitStatus, LimitStatus } from '../domain/limit';
 import { proposeFifoAllocation } from '../domain/allocation';
 import { assessCancellation, DEFAULT_CANCEL_POLICY } from '../domain/cancelPolicy';
@@ -86,6 +86,7 @@ interface AppContextValue {
   clearAllRejectedOperations: () => Promise<void>;
   syncStatus: { isSyncing: boolean; message: string; lastResult?: SyncResult };
   syncNow: () => Promise<SyncResult>;
+  forcePushAll: () => Promise<SyncResult>;
   testConnection: (url: string, token: string) => Promise<{ success: boolean; message: string }>;
   exportBackup: () => Promise<string>;
   restoreBackup: (jsonStr: string) => Promise<void>;
@@ -909,6 +910,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [settings, refreshFromIDB]);
 
+  const forcePushAll = useCallback(async (): Promise<SyncResult> => {
+    setSyncStatus({ isSyncing: true, message: 'Wysyłanie całej bazy do Arkusza Google...' });
+    try {
+      const res = await forcePushAllData(settings, (msg) => {
+        setSyncStatus(s => ({ ...s, message: msg }));
+      });
+      setSyncStatus({ isSyncing: false, message: res.message, lastResult: res });
+      await refreshFromIDB();
+      return res;
+    } catch (err: any) {
+      const errRes: SyncResult = {
+        success: false,
+        pushedCount: 0,
+        pulledCount: 0,
+        rejectedCount: 0,
+        message: 'Błąd synchronizacji',
+        error: err.message
+      };
+      setSyncStatus({ isSyncing: false, message: err.message, lastResult: errRes });
+      return errRes;
+    }
+  }, [settings, refreshFromIDB]);
+
   const testConnection = useCallback(async (url: string, token: string) => {
     return await testGasConnection(url, token);
   }, []);
@@ -1006,6 +1030,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     clearAllRejectedOperations,
     syncStatus,
     syncNow,
+    forcePushAll,
     testConnection,
     exportBackup,
     restoreBackup,
@@ -1059,6 +1084,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     clearAllRejectedOperations,
     syncStatus,
     syncNow,
+    forcePushAll,
     testConnection,
     exportBackup,
     restoreBackup,
