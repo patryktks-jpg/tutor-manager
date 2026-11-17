@@ -1,14 +1,20 @@
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Money } from '../../domain/money';
-import { getChargesBalance } from '../../domain/allocation';
-import { IconDownload, IconX } from '../common/Icons';
+import { getChargesBalance, proposeFifoAllocation } from '../../domain/allocation';
+import { PaymentMethod, Student } from '../../domain/types';
+import { IconDownload, IconX, IconCheck } from '../common/Icons';
 
 export const FinanceView: React.FC = () => {
-  const { charges, payments, paymentAllocations, incomeEntries, students, deleteCharge } = useApp();
+  const { charges, payments, paymentAllocations, incomeEntries, students, deleteCharge, recordPayment } = useApp();
   const [activeSubTab, setActiveSubTab] = useState<'charges' | 'payments' | 'register'>('charges');
-  const [chargesFilter, setChargesFilter] = useState<'all' | 'open'>('all');
+  const [chargesFilter, setChargesFilter] = useState<'all' | 'open'>('open');
   const [periodFilter, setPeriodFilter] = useState('2026-11');
+
+  // Payment Modal state (B2)
+  const [payModalStudent, setPayModalStudent] = useState<Student | null>(null);
+  const [payModalAmountStr, setPayModalAmountStr] = useState('');
+  const [payModalMethod, setPayModalMethod] = useState<PaymentMethod>('blik');
 
   // Charges balance & age of debt
   const openCharges = useMemo(() => {
@@ -18,6 +24,37 @@ export const FinanceView: React.FC = () => {
     // Sort by oldest accrual_date first (age of debt)
     return list.sort((a, b) => a.charge.accrual_date.localeCompare(b.charge.accrual_date));
   }, [charges, paymentAllocations]);
+
+  // Group open charges by student (B2)
+  const openDebtsByStudent = useMemo(() => {
+    const map = new Map<string, { student: Student; charges: typeof openCharges; total: number }>();
+    for (const item of openCharges) {
+      const s = students.find(stud => stud.id === item.charge.student_id);
+      if (!s) continue;
+      if (!map.has(s.id)) {
+        map.set(s.id, { student: s, charges: [], total: 0 });
+      }
+      const entry = map.get(s.id)!;
+      entry.charges.push(item);
+      entry.total += item.remainingAmount;
+    }
+    return Array.from(map.values()).sort((a, b) => b.total - a.total);
+  }, [openCharges, students]);
+
+  // Live FIFO allocation preview for modal (B2)
+  const payAllocationPreview = useMemo(() => {
+    if (!payModalStudent) return null;
+    const amountGrosze = Money.parse(payModalAmountStr || '0');
+    if (amountGrosze <= 0) return null;
+
+    const studentCharges = charges.filter(c => c.student_id === payModalStudent.id);
+    const studentAllocs = paymentAllocations.filter(a => {
+      const ch = charges.find(c => c.id === a.charge_id);
+      return ch?.student_id === payModalStudent.id;
+    });
+
+    return proposeFifoAllocation(amountGrosze, studentCharges, studentAllocs);
+  }, [payModalStudent, payModalAmountStr, charges, paymentAllocations]);
 
   // Filtered income entries
   const filteredIncome = useMemo(() => {
@@ -131,7 +168,7 @@ export const FinanceView: React.FC = () => {
           </div>
 
           {chargesFilter === 'open' ? (
-            openCharges.length === 0 ? (
+            openDebtsByStudent.length === 0 ? (
               <div className="ios-card" style={{ textAlign: 'center', padding: '24px 16px' }}>
                 <div style={{ fontWeight: 600, color: 'var(--ios-green)' }}>Brak zaległości!</div>
                 <div style={{ fontSize: 13, color: 'var(--ios-text-secondary)', marginTop: 4 }}>
@@ -139,51 +176,111 @@ export const FinanceView: React.FC = () => {
                 </div>
               </div>
             ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                {openCharges.map(item => {
-                  const student = students.find(s => s.id === item.charge.student_id);
-                  const daysOld = Math.floor(
-                    (new Date().getTime() - new Date(item.charge.accrual_date).getTime()) / (1000 * 60 * 60 * 24)
-                  );
-
-                  return (
-                    <div key={item.charge.id} className="ios-card" style={{ marginBottom: 0 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                        <div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            <span style={{ fontWeight: 700, fontSize: 15 }}>
-                              {student ? `${student.first_name} ${student.last_name}` : 'Uczeń'}
-                            </span>
-                            <span
-                              className="ios-badge"
-                              style={{
-                                backgroundColor: daysOld > 14 ? 'rgba(255,59,48,0.15)' : 'rgba(255,149,0,0.15)',
-                                color: daysOld > 14 ? 'var(--ios-red)' : 'var(--ios-amber)',
-                                fontSize: 10
-                              }}
-                            >
-                              {daysOld} dni temu
-                            </span>
-                          </div>
-                          <div style={{ fontSize: 13, color: 'var(--ios-text-secondary)', marginTop: 2 }}>
-                            Termin: {item.charge.accrual_date} • {item.charge.description || 'Lekcja'}
-                          </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+                {openDebtsByStudent.map(({ student, charges: studentOpenCharges, total }) => (
+                  <div
+                    key={student.id}
+                    className="ios-card"
+                    style={{ marginBottom: 0, border: '1px solid var(--ios-border)', borderRadius: 14 }}
+                  >
+                    {/* Student Debt Header */}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 16 }}>
+                          {student.first_name} {student.last_name}
                         </div>
-
-                        <div style={{ textAlign: 'right' }}>
-                          <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--ios-red)' }}>
-                            {Money.format(item.remainingAmount)}
-                          </div>
-                          {item.allocatedAmount > 0 && (
-                            <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)' }}>
-                              z {Money.format(item.charge.amount)} (częściowo)
-                            </div>
-                          )}
+                        <div style={{ fontSize: 12, color: 'var(--ios-text-secondary)' }}>
+                          Łączne zadłużenie ({studentOpenCharges.length} {studentOpenCharges.length === 1 ? 'należność' : 'należności'}):
+                        </div>
+                      </div>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontSize: 18, fontWeight: 800, color: 'var(--ios-red)' }}>
+                          {Money.format(total)}
                         </div>
                       </div>
                     </div>
-                  );
-                })}
+
+                    {/* Quick Pay All Button (B2) */}
+                    <button
+                      onClick={() => {
+                        setPayModalStudent(student);
+                        setPayModalAmountStr(Money.format(total, false));
+                      }}
+                      className="ios-btn ios-btn-primary"
+                      style={{ width: '100%', marginBottom: 12, fontSize: 13, fontWeight: 700 }}
+                    >
+                      <IconCheck size={16} /> Zapłać wszystkie zaległe ({Money.format(total)})
+                    </button>
+
+                    {/* Breakdown of individual charges */}
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                      {studentOpenCharges.map(item => {
+                        const daysOld = Math.floor(
+                          (new Date().getTime() - new Date(item.charge.accrual_date).getTime()) / (1000 * 60 * 60 * 24)
+                        );
+
+                        return (
+                          <div
+                            key={item.charge.id}
+                            style={{
+                              padding: 10,
+                              borderRadius: 10,
+                              background: 'var(--ios-bg)',
+                              border: '1px solid var(--ios-separator)',
+                              display: 'flex',
+                              justifyContent: 'space-between',
+                              alignItems: 'center'
+                            }}
+                          >
+                            <div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                <span style={{ fontWeight: 600, fontSize: 14 }}>
+                                  {item.charge.description || 'Lekcja'}
+                                </span>
+                                <span
+                                  className="ios-badge"
+                                  style={{
+                                    backgroundColor: daysOld > 14 ? 'rgba(255,59,48,0.15)' : 'rgba(255,149,0,0.15)',
+                                    color: daysOld > 14 ? 'var(--ios-red)' : 'var(--ios-amber)',
+                                    fontSize: 10
+                                  }}
+                                >
+                                  {daysOld} dni temu
+                                </span>
+                              </div>
+                              <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)', marginTop: 2 }}>
+                                Data: {item.charge.accrual_date}
+                              </div>
+                            </div>
+
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                              <div style={{ textAlign: 'right' }}>
+                                <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--ios-red)' }}>
+                                  {Money.format(item.remainingAmount)}
+                                </div>
+                                {item.allocatedAmount > 0 && (
+                                  <div style={{ fontSize: 10, color: 'var(--ios-text-secondary)' }}>
+                                    z {Money.format(item.charge.amount)}
+                                  </div>
+                                )}
+                              </div>
+                              <button
+                                onClick={() => {
+                                  setPayModalStudent(student);
+                                  setPayModalAmountStr(Money.format(item.remainingAmount, false));
+                                }}
+                                className="ios-btn ios-btn-secondary"
+                                style={{ padding: '4px 8px', fontSize: 11, minHeight: 28 }}
+                              >
+                                Wpłać
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
               </div>
             )
           ) : (
@@ -344,6 +441,135 @@ export const FinanceView: React.FC = () => {
 
           <div style={{ fontSize: 12, color: 'var(--ios-text-secondary)', lineHeight: 1.4 }}>
             ℹ️ Ewidencja numerowana jest ściśle rosnąco (RRRR/NNN) bez luk. Anulowanie wpisu następuje poprzez storno, nie usuwanie.
+          </div>
+        </div>
+      )}
+
+      {/* Payment Modal with Live FIFO Preview (B2) */}
+      {payModalStudent && (
+        <div className="ios-modal-overlay" onClick={() => setPayModalStudent(null)}>
+          <div className="ios-modal-content" onClick={e => e.stopPropagation()}>
+            <div className="ios-modal-grabber" />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+              <h3 style={{ fontSize: 18, fontWeight: 700 }}>
+                Rozlicz wpłatę: {payModalStudent.first_name} {payModalStudent.last_name}
+              </h3>
+              <button
+                onClick={() => setPayModalStudent(null)}
+                className="ios-btn ios-btn-secondary"
+                style={{ padding: '4px 8px', fontSize: 12 }}
+              >
+                Zamknij
+              </button>
+            </div>
+
+            {/* Amount Input */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 4 }}>
+                Kwota wpłaty (zł):
+              </label>
+              <input
+                type="text"
+                className="ios-input"
+                style={{ fontSize: 18, fontWeight: 700 }}
+                value={payModalAmountStr}
+                onChange={e => setPayModalAmountStr(e.target.value)}
+                placeholder="np. 70 lub 140"
+              />
+            </div>
+
+            {/* Payment Method Selector */}
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 6 }}>
+                Metoda płatności:
+              </label>
+              <div style={{ display: 'flex', gap: 8 }}>
+                {(['blik', 'przelew', 'gotowka'] as const).map(m => (
+                  <button
+                    key={m}
+                    onClick={() => setPayModalMethod(m)}
+                    className={`ios-btn ${payModalMethod === m ? 'ios-btn-primary' : 'ios-btn-secondary'}`}
+                    style={{ flex: 1, textTransform: 'uppercase', fontSize: 12, fontWeight: 600 }}
+                  >
+                    {m}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Live FIFO Allocation Preview (B2) */}
+            {payAllocationPreview && (
+              <div
+                style={{
+                  background: 'var(--ios-bg)',
+                  borderRadius: 12,
+                  padding: 12,
+                  marginBottom: 16,
+                  border: '1px solid var(--ios-border)'
+                }}
+              >
+                <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 6, color: 'var(--ios-text-secondary)' }}>
+                  PODGLĄD POKRYCIA NALEŻNOŚCI (FIFO):
+                </div>
+                {payAllocationPreview.allocations.length === 0 && payAllocationPreview.creditOverpayment === 0 ? (
+                  <div style={{ fontSize: 12, color: 'var(--ios-text-secondary)' }}>Wpisz kwotę wpłaty</div>
+                ) : (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {payAllocationPreview.allocations.map(a => {
+                      const ch = charges.find(c => c.id === a.chargeId);
+                      return (
+                        <div key={a.chargeId} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                          <span>
+                            • {ch?.accrual_date} ({ch?.description || 'Lekcja'})
+                          </span>
+                          <span style={{ fontWeight: 700, color: 'var(--ios-green)' }}>
+                            +{Money.format(a.amount)}
+                          </span>
+                        </div>
+                      );
+                    })}
+                    {payAllocationPreview.creditOverpayment > 0 && (
+                      <div
+                        style={{
+                          display: 'flex',
+                          justifyContent: 'space-between',
+                          fontSize: 13,
+                          marginTop: 4,
+                          paddingTop: 4,
+                          borderTop: '1px dashed var(--ios-border)',
+                          color: 'var(--ios-blue)',
+                          fontWeight: 600
+                        }}
+                      >
+                        <span>• Nadpłata na poczet przyszłych lekcji</span>
+                        <span>+{Money.format(payAllocationPreview.creditOverpayment)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <button
+              onClick={async () => {
+                const amountGrosze = Money.parse(payModalAmountStr);
+                if (amountGrosze <= 0) {
+                  alert('Podaj prawidłową kwotę.');
+                  return;
+                }
+                await recordPayment({
+                  student_id: payModalStudent.id,
+                  amount: amountGrosze,
+                  method: payModalMethod,
+                  description: `Wpłata ${payModalMethod.toUpperCase()}`
+                }, true);
+                setPayModalStudent(null);
+              }}
+              className="ios-btn ios-btn-primary"
+              style={{ width: '100%', fontSize: 15, fontWeight: 700, padding: 14 }}
+            >
+              Zatwierdź wpłatę ({Money.format(Money.parse(payModalAmountStr || '0'))})
+            </button>
           </div>
         </div>
       )}

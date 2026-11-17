@@ -166,6 +166,7 @@ export interface Package {
 
 export interface IncomeEntry {
   id: UUID;
+  charge_id?: UUID;              // A4: Link to specific charge (1 charge = 1 income entry)
   number: string;                // e.g. "2026/001"
   service_date: string;          // yyyy-MM-dd
   accrual_date: string;          // yyyy-MM-dd
@@ -247,6 +248,9 @@ export interface Settings {
   work_days: number[];           // [1,2,3,4,5,6] (Mon-Sat)
   breaks_min: number;            // 15
   pin_hash?: string;
+  pin_salt?: string;             // A5: PBKDF2 random salt
+  failed_pin_attempts?: number;  // A5: lockout counter
+  lockout_until?: string;        // A5: lockout expiration timestamp
   pin_enabled: boolean;
   biometrics_enabled: boolean;
   auto_lock_min: number;

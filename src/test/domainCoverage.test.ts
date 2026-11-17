@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { Money } from '../domain/money';
 import { assessCancellation, DEFAULT_CANCEL_POLICY } from '../domain/cancelPolicy';
 import { getStudentFinancialSummary } from '../domain/allocation';
-import { generateUUID, hashPin } from '../domain/crypto';
+import { generateUUID, hashPin, hashPinPBKDF2 } from '../domain/crypto';
 import { getWarsawDateStr, getWarsawDateTimeStr, getWarsawWeekRange } from '../domain/dateUtils';
 import { findLessonConflicts, generateSeriesOccurrences } from '../domain/series';
 import { buildCompleteAndPayPayload } from '../domain/lessonOps';
@@ -124,9 +124,13 @@ describe('Domain Full Coverage Suite (≥ 90%)', () => {
     const uuid = generateUUID();
     expect(uuid).toHaveLength(36);
 
-    const hash1 = await hashPin('1234');
-    const hash2 = await hashPin('1234');
-    expect(hash1).toBe(hash2);
+    const res1 = await hashPin('1234');
+    expect(res1.hash).toBeDefined();
+    expect(res1.salt).toBeDefined();
+
+    const hashPBKDF2_1 = await hashPinPBKDF2('1234', res1.salt);
+    const hashPBKDF2_2 = await hashPinPBKDF2('1234', res1.salt);
+    expect(hashPBKDF2_1).toBe(hashPBKDF2_2);
   });
 
   it('covers dateUtils module Warsaw timezone', () => {

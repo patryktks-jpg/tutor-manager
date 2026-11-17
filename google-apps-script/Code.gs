@@ -122,6 +122,13 @@ function doPost(e) {
       });
     }
 
+    if (body.action === 'pull') {
+      var since = body.since || '1970-01-01T00:00:00Z';
+      var data = fetchIncremental(since);
+      var serverTime = Utilities.formatDate(new Date(), 'UTC', "yyyy-MM-dd'T'HH:mm:ss'Z'");
+      return jsonResponse({ status: 'ok', data: data, server_time: serverTime });
+    }
+
     if (body.action === 'export_report') {
       var exportRes = generateReportFiles(ss, body.period_id, body.data);
       return jsonResponse({ status: 'ok', files: exportRes });
@@ -163,7 +170,12 @@ function loadProcessedOps(ss) {
   return set;
 }
 
-function normalizeDateValue(val) {
+/**
+ * A1 [P0]: Normalizuje odczytaną komórkę arkusza.
+ * Obiekty Date zamienia na string ISO (yyyy-MM-dd lub yyyy-MM-ddTHH:mm:ss w strefie Europe/Warsaw).
+ * Liczby, stringi i wartości logiczne pozostawia bez zmian.
+ */
+function normalizeCell(val) {
   if (val instanceof Date) {
     var hours = val.getHours();
     var minutes = val.getMinutes();
@@ -175,6 +187,8 @@ function normalizeDateValue(val) {
   }
   return val;
 }
+
+var normalizeDateValue = normalizeCell;
 
 function isDateInClosedPeriod(ss, dateStr) {
   if (!dateStr) return false;

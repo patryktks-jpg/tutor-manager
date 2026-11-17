@@ -16,6 +16,7 @@ export interface LimitStatus {
   usedPercentage: number;
   forecastGrosze: number;
   forecastPercentage: number;
+  forecastExceededOn?: string; // yyyy-MM-dd: predicted date when planned lessons will exceed limit
   isExceeded: boolean;
   exceededOn?: string; // yyyy-MM-dd
   ceidgDeadline?: string; // yyyy-MM-dd (exceededOn + 7 days)
@@ -98,15 +99,32 @@ export function calculateQuarterLimitStatus(
   const remainingGrosze = limitGrosze - usedGrosze;
   const usedPercentage = limitGrosze > 0 ? (usedGrosze / limitGrosze) * 100 : 0;
 
-  // Forecast: add planned lessons in the remainder of the quarter
-  const futureQuarterLessons = upcomingLessons.filter(l => {
-    const lDate = l.start_at.slice(0, 10);
-    return l.status === 'planned' && lDate >= quarter.startDate && lDate <= quarter.endDate;
-  });
+  // Forecast: add planned and scheduled lessons in the remainder of the quarter (B3)
+  const targetDay = targetDate.slice(0, 10);
+  const futureQuarterLessons = upcomingLessons
+    .filter(l => {
+      const lDate = l.start_at.slice(0, 10);
+      return (l.status === 'planned' || l.status === 'needs_confirmation') &&
+             lDate >= targetDay &&
+             lDate <= quarter.endDate;
+    })
+    .sort((a, b) => a.start_at.localeCompare(b.start_at));
 
   const plannedAdditionalGrosze = futureQuarterLessons.reduce((sum, l) => sum + l.price_snapshot, 0);
   const forecastGrosze = usedGrosze + plannedAdditionalGrosze;
   const forecastPercentage = limitGrosze > 0 ? (forecastGrosze / limitGrosze) * 100 : 0;
+
+  let forecastExceededOn: string | undefined = undefined;
+  if (forecastGrosze > limitGrosze) {
+    let fSum = usedGrosze;
+    for (const fl of futureQuarterLessons) {
+      fSum += fl.price_snapshot;
+      if (fSum > limitGrosze) {
+        forecastExceededOn = fl.start_at.slice(0, 10);
+        break;
+      }
+    }
+  }
 
   const isExceeded = usedGrosze > limitGrosze;
   let ceidgDeadline: string | undefined = undefined;
@@ -114,8 +132,7 @@ export function calculateQuarterLimitStatus(
 
   if (isExceeded && exceededOn) {
     ceidgDeadline = addDays(exceededOn, 7);
-    const todayStr = targetDate.slice(0, 10);
-    const msDiff = new Date(ceidgDeadline).getTime() - new Date(todayStr).getTime();
+    const msDiff = new Date(ceidgDeadline).getTime() - new Date(targetDay).getTime();
     daysLeftToCeidg = Math.ceil(msDiff / (1000 * 60 * 60 * 24));
   }
 
@@ -139,6 +156,7 @@ export function calculateQuarterLimitStatus(
     usedPercentage: Math.round(usedPercentage * 10) / 10,
     forecastGrosze,
     forecastPercentage: Math.round(forecastPercentage * 10) / 10,
+    forecastExceededOn,
     isExceeded,
     exceededOn,
     ceidgDeadline,

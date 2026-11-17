@@ -9,6 +9,22 @@ if ('serviceWorker' in navigator && window.location.protocol.startsWith('http'))
   window.addEventListener('load', () => {
     const swUrl = new URL('sw.js', window.location.href).href;
     navigator.serviceWorker.register(swUrl).then(registration => {
+      // Check if update is waiting immediately
+      if (registration.waiting) {
+        window.dispatchEvent(new CustomEvent('sw-update-available'));
+      }
+
+      registration.addEventListener('updatefound', () => {
+        const newWorker = registration.installing;
+        if (newWorker) {
+          newWorker.addEventListener('statechange', () => {
+            if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+              window.dispatchEvent(new CustomEvent('sw-update-available'));
+            }
+          });
+        }
+      });
+
       // Check for updates whenever window regains focus
       window.addEventListener('focus', () => {
         registration.update().catch(() => {});

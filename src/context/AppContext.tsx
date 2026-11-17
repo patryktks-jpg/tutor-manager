@@ -20,7 +20,8 @@ import {
   UUID,
   PaymentMethod
 } from '../domain/types';
-import { generateUUID, hashPin } from '../domain/crypto';
+import { generateUUID, hashPin, verifyAndMigratePin } from '../domain/crypto';
+import { deriveIncomeEntry } from '../domain/income';
 import { getWarsawDateStr } from '../domain/dateUtils';
 import { IDBManager } from '../db/idb';
 import { syncWithGas, testGasConnection, forcePushAllData, pullCleanFromGas as pullCleanFromGasSync, exportReportViaGas, syncLessonToCalendarViaGas, SyncResult } from '../db/sync';
@@ -247,28 +248,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [settings.pin_enabled, settings.auto_lock_min, isLocked]);
 
-  const unlockWithPin = useCallback(async (pin: string): Promise<boolean> => {
-    if (!settings.pin_hash) {
-      setIsLocked(false);
-      return true;
-    }
-    const enteredHash = await hashPin(pin);
-    if (settings.pin_hash === enteredHash || settings.pin_hash === pin) {
-      setIsLocked(false);
-      return true;
-    }
-    return false;
-  }, [settings.pin_hash]);
-
-  const setAppPin = useCallback(async (pin: string) => {
-    const hashed = await hashPin(pin);
-    await updateSettings({ pin_hash: hashed, pin_enabled: true });
-  }, []);
-
-  const lockApp = useCallback(() => {
-    if (settings.pin_enabled) setIsLocked(true);
-  }, [settings.pin_enabled]);
-
   const commitChange = useCallback(async (table: string, action: 'insert' | 'update' | 'delete', record: any) => {
     if (action === 'delete') {
       await IDBManager.delete(table, record.id || record);
@@ -280,6 +259,77 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const q = await IDBManager.getAll<OfflineOperation>(db, 'offline_queue');
     setOfflineQueue(q);
   }, []);
+
+  const updateSettings = useCallback(async (newSettings: Partial<Settings>) => {
+    const nowIso = new Date().toISOString();
+    const updated: Settings = {
+      ...settings,
+      ...newSettings,
+      version: (settings.version || 1) + 1,
+      updated_at: nowIso
+    };
+    await commitChange('settings', 'update', updated);
+    setSettings(updated);
+  }, [settings, commitChange]);
+
+  const unlockWithPin = useCallback(async (pin: string): Promise<boolean> => {
+    if (!settings.pin_hash) {
+      setIsLocked(false);
+      return true;
+    }
+
+    // Sprawdzenie aktywnej blokady czasowej po 5 błędnych próbach (A5)
+    if (settings.lockout_until) {
+      const now = Date.now();
+      const lockUntil = new Date(settings.lockout_until).getTime();
+      if (now < lockUntil) {
+        return false;
+      }
+    }
+
+    const verification = await verifyAndMigratePin(pin, settings.pin_hash, settings.pin_salt);
+    if (verification.valid) {
+      const updates: Partial<Settings> = {
+        failed_pin_attempts: 0,
+        lockout_until: undefined
+      };
+      // Automatyczna przezroczysta migracja ze starego SHA-256 lub tekstu jawnego do PBKDF2
+      if (verification.shouldMigrate && verification.newHash && verification.newSalt) {
+        updates.pin_hash = verification.newHash;
+        updates.pin_salt = verification.newSalt;
+      }
+      await updateSettings(updates);
+      setIsLocked(false);
+      return true;
+    } else {
+      const failed = (settings.failed_pin_attempts || 0) + 1;
+      let lockoutUntil: string | undefined = undefined;
+      if (failed >= 5) {
+        const lockoutSeconds = 30 * (failed - 4);
+        lockoutUntil = new Date(Date.now() + lockoutSeconds * 1000).toISOString();
+      }
+      await updateSettings({
+        failed_pin_attempts: failed,
+        lockout_until: lockoutUntil
+      });
+      return false;
+    }
+  }, [settings.pin_hash, settings.pin_salt, settings.failed_pin_attempts, settings.lockout_until, updateSettings]);
+
+  const setAppPin = useCallback(async (pin: string) => {
+    const { hash, salt } = await hashPin(pin);
+    await updateSettings({
+      pin_hash: hash,
+      pin_salt: salt,
+      pin_enabled: true,
+      failed_pin_attempts: 0,
+      lockout_until: undefined
+    });
+  }, [updateSettings]);
+
+  const lockApp = useCallback(() => {
+    if (settings.pin_enabled) setIsLocked(true);
+  }, [settings.pin_enabled]);
 
   // Helper to assert whether a date falls in a closed period
   const assertNotClosedPeriod = useCallback((dateStr: string) => {
@@ -480,7 +530,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const freshCharges = await IDBManager.getAll<Charge>(db, 'charges');
     const existingCharge = freshCharges.find(c => c.lesson_id === lesson.id && c.amount > 0);
 
-    if (!existingCharge) {
+    let charge = existingCharge;
+    if (!charge) {
       const newCharge: Charge = {
         id: generateUUID(),
         student_id: lesson.student_id,
@@ -495,33 +546,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
       await commitChange('charges', 'insert', newCharge);
       setCharges(prev => [...prev, newCharge]);
+      charge = newCharge;
     }
 
-    // 3. Create IncomeEntry as 'unpaid' if not existing
+    const activeCharge = charge!;
+
+    // 3. Create IncomeEntry as 'unpaid' if not existing (linked via charge_id - A4)
     const existingIncome = incomeEntries.find(
-      e => (e.lesson_id && e.lesson_id === lesson.id) ||
+      e => (e.charge_id && e.charge_id === activeCharge.id) ||
+           (e.lesson_id && e.lesson_id === lesson.id) ||
            (!e.lesson_id && e.service_date === lessonDate && e.student_id === lesson.student_id)
     );
     if (!existingIncome) {
       const year = Number(lessonDate.slice(0, 4));
       const formattedNum = getNextIncomeNumber(year);
 
-      const newIncome: IncomeEntry = {
-        id: generateUUID(),
+      const newIncome = deriveIncomeEntry({
+        charge: activeCharge,
+        allocations: [],
+        payments: [],
+        existingEntry: null,
         number: formattedNum,
-        service_date: lessonDate,
-        accrual_date: lessonDate,
-        student_id: lesson.student_id,
-        lesson_id: lesson.id,
-        service_type: lesson.subject || 'Lekcja matematyki',
-        amount_due: lesson.price_snapshot,
-        amount_received: 0,
-        method: 'blik',
-        status: 'unpaid',
-        version: 1,
-        created_at: nowIso,
-        updated_at: nowIso
-      };
+        nowIso
+      });
       await commitChange('income_entries', 'insert', newIncome);
       setIncomeEntries(prev => [...prev, newIncome]);
     }
@@ -589,26 +636,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
       await commitChange('payment_allocations', 'insert', newAlloc);
       setPaymentAllocations(prev => [...prev, newAlloc]);
-    }
 
-    // Update income entry
-    const entry = incomeEntries.find(
-      e => (e.lesson_id && e.lesson_id === lesson.id) ||
-           (!e.lesson_id && e.service_date === lessonDate && e.student_id === lesson.student_id)
-    );
-    if (entry) {
-      const updatedEntry: IncomeEntry = {
-        ...entry,
-        lesson_id: lesson.id,
-        received_date: dateToday,
-        amount_received: lesson.price_snapshot,
-        method,
-        status: 'paid',
-        version: entry.version + 1,
-        updated_at: nowIso
-      };
-      await commitChange('income_entries', 'update', updatedEntry);
-      setIncomeEntries(prev => prev.map(e => e.id === entry.id ? updatedEntry : e));
+      // Re-derive IncomeEntry from allocations using deriveIncomeEntry (A4)
+      const currentAllocs = [...paymentAllocations, newAlloc];
+      const currentPayments = [...payments, newPayment];
+      const entry = incomeEntries.find(
+        e => (e.charge_id && e.charge_id === targetCharge.id) ||
+             (e.lesson_id && e.lesson_id === lesson.id) ||
+             (!e.lesson_id && e.service_date === lessonDate && e.student_id === lesson.student_id)
+      );
+
+      const year = Number(lessonDate.slice(0, 4));
+      const formattedNum = entry?.number || getNextIncomeNumber(year);
+
+      const updatedEntry = deriveIncomeEntry({
+        charge: targetCharge,
+        allocations: currentAllocs,
+        payments: currentPayments,
+        existingEntry: entry,
+        number: formattedNum,
+        nowIso
+      });
+
+      if (entry) {
+        await commitChange('income_entries', 'update', updatedEntry);
+        setIncomeEntries(prev => prev.map(e => e.id === entry.id ? updatedEntry : e));
+      } else {
+        await commitChange('income_entries', 'insert', updatedEntry);
+        setIncomeEntries(prev => [...prev, updatedEntry]);
+      }
     }
   }, [lessons, charges, paymentAllocations, incomeEntries, todayStr, completeAndPayLesson, commitChange]);
 
@@ -653,6 +709,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
         await commitChange('charges', 'insert', cancelCharge);
         setCharges(prev => [...prev, cancelCharge]);
+
+        // Create IncomeEntry for late cancellation fee (A4)
+        const year = Number(cancelCharge.accrual_date.slice(0, 4));
+        const formattedNum = getNextIncomeNumber(year);
+        const cancelIncome = deriveIncomeEntry({
+          charge: cancelCharge,
+          allocations: [],
+          payments: [],
+          existingEntry: null,
+          number: formattedNum,
+          nowIso
+        });
+        await commitChange('income_entries', 'insert', cancelIncome);
+        setIncomeEntries(prev => [...prev, cancelIncome]);
       }
     }
   }, [lessons, markLessonCompleted, assertNotClosedPeriod, commitChange]);
@@ -846,6 +916,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
 
       const proposed = proposeFifoAllocation(newPayment.amount, studentCharges, studentAllocs);
+      const newAllocs: PaymentAllocation[] = [];
+      const affectedChargeIds = new Set<string>();
+
       for (const item of proposed.allocations) {
         const alloc: PaymentAllocation = {
           id: generateUUID(),
@@ -857,7 +930,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           updated_at: nowIso
         };
         await commitChange('payment_allocations', 'insert', alloc);
-        setPaymentAllocations(prev => [...prev, alloc]);
+        newAllocs.push(alloc);
+        affectedChargeIds.add(item.chargeId);
+      }
+      setPaymentAllocations(prev => [...prev, ...newAllocs]);
+
+      // Update IncomeEntries for ALL affected charges (A4)
+      const allUpdatedAllocs = [...paymentAllocations, ...newAllocs];
+      const allUpdatedPayments = [...payments, newPayment];
+
+      for (const chargeId of affectedChargeIds) {
+        const ch = charges.find(c => c.id === chargeId);
+        if (ch) {
+          const existingIncome = incomeEntries.find(
+            e => (e.charge_id && e.charge_id === ch.id) || (ch.lesson_id && e.lesson_id === ch.lesson_id)
+          );
+          const year = Number(ch.accrual_date.slice(0, 4));
+          const formattedNum = existingIncome?.number || getNextIncomeNumber(year);
+
+          const updatedEntry = deriveIncomeEntry({
+            charge: ch,
+            allocations: allUpdatedAllocs,
+            payments: allUpdatedPayments,
+            existingEntry: existingIncome,
+            number: formattedNum,
+            nowIso
+          });
+
+          if (existingIncome) {
+            await commitChange('income_entries', 'update', updatedEntry);
+            setIncomeEntries(prev => prev.map(e => e.id === existingIncome.id ? updatedEntry : e));
+          } else {
+            await commitChange('income_entries', 'insert', updatedEntry);
+            setIncomeEntries(prev => [...prev, updatedEntry]);
+          }
+        }
       }
     }
 
@@ -925,18 +1032,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await commitChange('legal_params', 'update', updated);
     setLegalParams(prev => prev.map(p => p.id === params.id ? updated : p));
   }, [commitChange]);
-
-  const updateSettings = useCallback(async (newSettings: Partial<Settings>) => {
-    const nowIso = new Date().toISOString();
-    const updated: Settings = {
-      ...settings,
-      ...newSettings,
-      version: (settings.version || 1) + 1,
-      updated_at: nowIso
-    };
-    await commitChange('settings', 'update', updated);
-    setSettings(updated);
-  }, [settings, commitChange]);
 
   const acceptLegalDeclaration = useCallback(async () => {
     const nowIso = new Date().toISOString();

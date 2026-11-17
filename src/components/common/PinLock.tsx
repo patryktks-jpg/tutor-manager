@@ -1,34 +1,70 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { IconLock } from './Icons';
+import { useApp } from '../../context/AppContext';
 
 interface PinLockProps {
   onUnlock: (pin: string) => Promise<boolean> | boolean;
 }
 
 export const PinLock: React.FC<PinLockProps> = ({ onUnlock }) => {
+  const { settings } = useApp();
   const [pin, setPin] = useState('');
   const [error, setError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [remainingLockout, setRemainingLockout] = useState(0);
+
+  // Check lockout countdown
+  useEffect(() => {
+    const checkLockout = () => {
+      if (settings.lockout_until) {
+        const remaining = Math.ceil((new Date(settings.lockout_until).getTime() - Date.now()) / 1000);
+        if (remaining > 0) {
+          setRemainingLockout(remaining);
+          return;
+        }
+      }
+      setRemainingLockout(0);
+    };
+
+    checkLockout();
+    const timer = setInterval(checkLockout, 1000);
+    return () => clearInterval(timer);
+  }, [settings.lockout_until]);
+
+  const submitPin = async (codeToTest: string) => {
+    if (remainingLockout > 0) return;
+    const success = await onUnlock(codeToTest);
+    if (!success) {
+      setError(true);
+      setErrorMessage(
+        settings.failed_pin_attempts && settings.failed_pin_attempts >= 4
+          ? 'Zbyt wiele błędnych prób. Blokada!'
+          : 'Nieprawidłowy kod PIN'
+      );
+      setTimeout(() => {
+        setPin('');
+        setError(false);
+        setErrorMessage('');
+      }, 700);
+    }
+  };
 
   const handleDigit = async (digit: string) => {
-    if (pin.length < 4) {
+    if (remainingLockout > 0) return;
+    if (pin.length < 6) {
       const nextPin = pin + digit;
       setPin(nextPin);
-      if (nextPin.length === 4) {
-        const success = await onUnlock(nextPin);
-        if (!success) {
-          setError(true);
-          setTimeout(() => {
-            setPin('');
-            setError(false);
-          }, 600);
-        }
+      if (nextPin.length === 6) {
+        await submitPin(nextPin);
       }
     }
   };
 
   const handleDelete = () => {
+    if (remainingLockout > 0) return;
     setPin(prev => prev.slice(0, -1));
     setError(false);
+    setErrorMessage('');
   };
 
   return (
@@ -51,7 +87,7 @@ export const PinLock: React.FC<PinLockProps> = ({ onUnlock }) => {
             width: 64,
             height: 64,
             borderRadius: 32,
-            backgroundColor: 'var(--ios-card-bg)',
+            backgroundColor: remainingLockout > 0 ? 'rgba(255, 59, 48, 0.15)' : 'var(--ios-card-bg)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
@@ -59,28 +95,36 @@ export const PinLock: React.FC<PinLockProps> = ({ onUnlock }) => {
             boxShadow: '0 4px 12px rgba(0,0,0,0.08)'
           }}
         >
-          <IconLock size={32} color="var(--ios-blue)" />
+          <IconLock size={32} color={remainingLockout > 0 ? 'var(--ios-red)' : 'var(--ios-blue)'} />
         </div>
         <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 4 }}>Tutor Manager</h2>
-        <p style={{ fontSize: 14, color: 'var(--ios-text-secondary)' }}>Wprowadź 4-cyfrowy kod PIN</p>
+        {remainingLockout > 0 ? (
+          <p style={{ fontSize: 14, color: 'var(--ios-red)', fontWeight: 600 }}>
+            Zbyt wiele błędnych prób. Odczekaj {remainingLockout} s
+          </p>
+        ) : (
+          <p style={{ fontSize: 14, color: errorMessage ? 'var(--ios-red)' : 'var(--ios-text-secondary)' }}>
+            {errorMessage || 'Wprowadź kod PIN (4-6 cyfr)'}
+          </p>
+        )}
       </div>
 
-      {/* PIN Dots */}
+      {/* PIN Dots (supports up to 6 digits) */}
       <div
         style={{
           display: 'flex',
-          gap: 16,
+          gap: 14,
           marginBottom: 36,
           animation: error ? 'shake 0.4s ease-in-out' : 'none'
         }}
       >
-        {[0, 1, 2, 3].map(i => (
+        {[0, 1, 2, 3, 4, 5].map(i => (
           <div
             key={i}
             style={{
-              width: 16,
-              height: 16,
-              borderRadius: 8,
+              width: 14,
+              height: 14,
+              borderRadius: 7,
               border: `2px solid ${error ? 'var(--ios-red)' : 'var(--ios-blue)'}`,
               backgroundColor: i < pin.length ? (error ? 'var(--ios-red)' : 'var(--ios-blue)') : 'transparent',
               transition: 'all 0.15s ease'
@@ -96,7 +140,9 @@ export const PinLock: React.FC<PinLockProps> = ({ onUnlock }) => {
           gridTemplateColumns: 'repeat(3, 1fr)',
           gap: 16,
           width: '100%',
-          maxWidth: 280
+          maxWidth: 280,
+          opacity: remainingLockout > 0 ? 0.4 : 1,
+          pointerEvents: remainingLockout > 0 ? 'none' : 'auto'
         }}
       >
         {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map(d => (
@@ -119,7 +165,25 @@ export const PinLock: React.FC<PinLockProps> = ({ onUnlock }) => {
           </button>
         ))}
 
-        <div />
+        {/* OK / Unlock Button for 4-5 digit PINs */}
+        <button
+          onClick={() => submitPin(pin)}
+          disabled={pin.length < 4}
+          style={{
+            height: 72,
+            borderRadius: 36,
+            border: 'none',
+            backgroundColor: pin.length >= 4 ? 'var(--ios-blue)' : 'transparent',
+            color: pin.length >= 4 ? '#ffffff' : 'transparent',
+            fontSize: 16,
+            fontWeight: 700,
+            cursor: pin.length >= 4 ? 'pointer' : 'default',
+            boxShadow: pin.length >= 4 ? '0 2px 8px rgba(0, 122, 255, 0.3)' : 'none',
+            transition: 'all 0.2s ease'
+          }}
+        >
+          OK
+        </button>
 
         <button
           onClick={() => handleDigit('0')}

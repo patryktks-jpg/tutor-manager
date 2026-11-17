@@ -93,9 +93,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
   };
 
   const handleSavePin = async () => {
-    if (newPin && newPin.length === 4) {
+    if (newPin) {
+      if (newPin.length < 4 || newPin.length > 6 || !/^\d+$/.test(newPin)) {
+        alert('Kod PIN musi składać się z 4 do 6 cyfr.');
+        return;
+      }
       await setAppPin(newPin);
-      alert('Kod PIN został bezpiecznie zahashowany algorytmem SHA-256 i zapisany.');
+      alert('Kod PIN został bezpiecznie zahashowany algorytmem PBKDF2 (200 000 iteracji) i zapisany.');
       setNewPin('');
     } else {
       await updateSettings({ pin_enabled: pinEnabled });
@@ -460,14 +464,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
 
           {pinEnabled && (
             <div>
-              <label style={{ fontSize: 12, fontWeight: 600 }}>Nowy kod PIN (4 cyfry)</label>
+              <label style={{ fontSize: 12, fontWeight: 600 }}>Nowy kod PIN (zalecane 6 cyfr, min. 4)</label>
               <input
                 type="password"
-                maxLength={4}
-                placeholder="Wpisz 4 cyfry"
+                maxLength={6}
+                placeholder="Wpisz 4 do 6 cyfr"
                 className="ios-input"
                 value={newPin}
-                onChange={e => setNewPin(e.target.value)}
+                onChange={e => setNewPin(e.target.value.replace(/\D/g, ''))}
               />
             </div>
           )}

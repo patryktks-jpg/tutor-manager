@@ -15,6 +15,14 @@ export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<NavTab>('start');
   const [showSettings, setShowSettings] = useState(false);
   const [showQuickAddModal, setShowQuickAddModal] = useState(false);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+
+  // Service Worker update detection (A6)
+  useEffect(() => {
+    const handleUpdate = () => setUpdateAvailable(true);
+    window.addEventListener('sw-update-available', handleUpdate);
+    return () => window.removeEventListener('sw-update-available', handleUpdate);
+  }, []);
 
   // Deep linking handler from URL hash (#dzis, #dodaj-lekcje, #dodaj-wplate)
   useEffect(() => {
@@ -58,6 +66,43 @@ export const App: React.FC = () => {
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
+      {/* Service Worker Update Banner (A6) */}
+      {updateAvailable && (
+        <div
+          style={{
+            position: 'sticky',
+            top: 0,
+            zIndex: 1000,
+            background: 'var(--ios-blue)',
+            color: '#fff',
+            padding: '10px 16px',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            fontSize: 13,
+            fontWeight: 600,
+            boxShadow: '0 2px 10px rgba(0, 122, 255, 0.4)'
+          }}
+        >
+          <span>✨ Dostępna nowa wersja aplikacji</span>
+          <button
+            onClick={() => window.location.reload()}
+            style={{
+              background: '#fff',
+              color: 'var(--ios-blue)',
+              border: 'none',
+              borderRadius: 6,
+              padding: '4px 10px',
+              fontSize: 12,
+              fontWeight: 700,
+              cursor: 'pointer'
+            }}
+          >
+            Odśwież
+          </button>
+        </div>
+      )}
+
       {/* PIN Security Overlay */}
       {isLocked && <PinLock onUnlock={unlockWithPin} />}
 

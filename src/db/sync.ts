@@ -41,6 +41,9 @@ function sanitizeRecordForSheets(table: string, record: any): any {
   if (table === 'settings' && record) {
     const copy = { ...record };
     delete copy.pin_hash;
+    delete copy.pin_salt;
+    delete copy.failed_pin_attempts;
+    delete copy.lockout_until;
     delete copy.gas_secret_token;
     return copy;
   }

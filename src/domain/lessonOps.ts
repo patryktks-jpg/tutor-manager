@@ -124,6 +124,7 @@ export function buildCompleteAndPayPayload(
   if (!existingIncome) {
     newIncomeEntry = {
       id: generateUUID(),
+      charge_id: targetChargeId,
       number: nextIncomeNumber,
       service_date: lessonDate,
       accrual_date: lessonDate,
@@ -142,6 +143,7 @@ export function buildCompleteAndPayPayload(
   } else {
     updatedIncomeEntry = {
       ...existingIncome,
+      charge_id: targetChargeId,
       lesson_id: lesson.id,
       received_date: todayStr,
       amount_received: lesson.price_snapshot,

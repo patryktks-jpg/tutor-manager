@@ -1,9 +1,10 @@
 import React, { useState, useMemo } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Money } from '../../domain/money';
-import { Lesson, PaymentMethod } from '../../domain/types';
+import { Lesson, PaymentMethod, Student } from '../../domain/types';
 import { getChargesBalance } from '../../domain/allocation';
 import { getWarsawWeekRange } from '../../domain/dateUtils';
+import { generateSmsLink, generateWhatsAppLink, buildPaymentReminderText } from '../../domain/reminders';
 import { SwipeableCard } from '../common/SwipeableCard';
 import { NotificationBanner } from '../common/NotificationBanner';
 import { IconGear, IconCheck, IconX, IconCalendar, IconStudents } from '../common/Icons';
@@ -16,6 +17,7 @@ interface StartViewProps {
 
 export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCalendar }) => {
   const {
+    settings,
     lessons,
     students,
     charges,
@@ -118,6 +120,36 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
   const balanceMap = useMemo(() => {
     return getChargesBalance(charges, paymentAllocations);
   }, [charges, paymentAllocations]);
+
+  // Past unconfirmed lessons (start_at < todayStr and not yet completed/cancelled) (B1)
+  const unconfirmedLessons = useMemo(() => {
+    return lessons
+      .filter(l => l.start_at.slice(0, 10) < todayStr && (l.status === 'planned' || l.status === 'needs_confirmation'))
+      .sort((a, b) => b.start_at.localeCompare(a.start_at));
+  }, [lessons, todayStr]);
+
+  // Students with overdue unpaid debt (B1)
+  const overdueDebts = useMemo(() => {
+    const studentDebts: Record<string, { student: Student; totalUnpaid: number; oldestDate: string }> = {};
+    for (const c of charges) {
+      if (c.amount <= 0) continue;
+      const alloc = balanceMap.get(c.id);
+      const remaining = alloc ? alloc.remainingAmount : c.amount;
+      if (remaining > 0) {
+        const s = students.find(stud => stud.id === c.student_id);
+        if (s) {
+          if (!studentDebts[s.id]) {
+            studentDebts[s.id] = { student: s, totalUnpaid: 0, oldestDate: c.accrual_date };
+          }
+          studentDebts[s.id].totalUnpaid += remaining;
+          if (c.accrual_date < studentDebts[s.id].oldestDate) {
+            studentDebts[s.id].oldestDate = c.accrual_date;
+          }
+        }
+      }
+    }
+    return Object.values(studentDebts).sort((a, b) => b.totalUnpaid - a.totalUnpaid);
+  }, [charges, balanceMap, students]);
 
   const handleSwipeCancel = async (lesson: Lesson) => {
     await updateLessonStatus(lesson.id, 'cancelled_student');
@@ -222,6 +254,149 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
             </div>
           </div>
           <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--ios-red)' }}>Szczegóły &rarr;</span>
+        </div>
+      )}
+
+      {/* Limit forecast & CEIDG warning banner (B3) */}
+      {(limitStatus.forecastPercentage >= 100 || limitStatus.isExceeded) && (
+        <div
+          style={{
+            background: 'rgba(255, 59, 48, 0.12)',
+            border: '1px solid rgba(255, 59, 48, 0.4)',
+            borderRadius: 14,
+            padding: '12px 14px',
+            marginBottom: 16
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <span style={{ fontSize: 20 }}>🚨</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: 'var(--ios-red)' }}>
+              {limitStatus.isExceeded
+                ? 'Przekroczono limit działalności nierejestrowanej!'
+                : `Prognozowane przekroczenie limitu (${limitStatus.forecastPercentage}%)`}
+            </span>
+          </div>
+          <p style={{ fontSize: 12, color: 'var(--ios-text-primary)', margin: '4px 0 6px 0', lineHeight: 1.4 }}>
+            {limitStatus.isExceeded
+              ? `Przekroczenie nastąpiło ${limitStatus.exceededOn}. Zgodnie z art. 5 ust. 4 ustawy Prawo przedsiębiorców masz 7 dni na rejestrację w CEIDG (termin upływa: ${limitStatus.ceidgDeadline || 'wkrótce'}).`
+              : `Z zaplanowanymi lekcjami Twój przychód wyniesie ${Money.format(limitStatus.forecastGrosze)} (limit: ${Money.format(limitStatus.limitGrosze)}). Przewidywana data przekroczenia: ${limitStatus.forecastExceededOn || 'w tym kwartale'}.`}
+          </p>
+        </div>
+      )}
+
+      {/* Section: Do potwierdzenia (B1) */}
+      {unconfirmedLessons.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--ios-amber)' }}>
+              ⚠️ Do potwierdzenia ({unconfirmedLessons.length})
+            </h2>
+            <span style={{ fontSize: 12, color: 'var(--ios-text-secondary)' }}>Zaległe rozliczenia</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {unconfirmedLessons.map(lesson => {
+              const student = students.find(s => s.id === lesson.student_id);
+              const lessonDate = lesson.start_at.slice(0, 10);
+              const lessonTime = lesson.start_at.slice(11, 16);
+
+              return (
+                <div key={lesson.id} className="ios-card" style={{ marginBottom: 0, borderLeft: '4px solid var(--ios-amber)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 15 }}>
+                        {student ? `${student.first_name} ${student.last_name}` : 'Uczeń'}
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--ios-text-secondary)' }}>
+                        {lessonDate} o {lessonTime} • {lesson.subject}
+                      </div>
+                    </div>
+                    <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--ios-blue)' }}>
+                      {Money.format(lesson.price_snapshot)}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <button
+                      onClick={() => openPayDialog(lesson)}
+                      className="ios-btn ios-btn-primary"
+                      style={{ flex: 1, padding: '8px 12px', fontSize: 13, minHeight: 34 }}
+                    >
+                      <IconCheck size={16} /> Zrealizuj
+                    </button>
+                    <button
+                      onClick={() => openActionMenu(lesson)}
+                      className="ios-btn ios-btn-secondary"
+                      style={{ padding: '8px 12px', fontSize: 13, minHeight: 34 }}
+                    >
+                      Inny status...
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Section: Zaległości (B1 & B9) */}
+      {overdueDebts.length > 0 && (
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--ios-red)' }}>
+              Zaległości ({overdueDebts.length})
+            </h2>
+            <span style={{ fontSize: 12, color: 'var(--ios-text-secondary)' }}>Nieopłacone należności</span>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {overdueDebts.map(({ student, totalUnpaid, oldestDate }) => {
+              const reminderText = buildPaymentReminderText({
+                student,
+                tutorName: settings.tutor_name || 'Korepetytor',
+                customAmountGrosze: totalUnpaid
+              });
+              const smsUrl = student.phone ? generateSmsLink(student.phone, reminderText) : undefined;
+              const waUrl = student.phone ? generateWhatsAppLink(student.phone, reminderText) : undefined;
+
+              return (
+                <div key={student.id} className="ios-card" style={{ marginBottom: 0 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 8 }}>
+                    <div>
+                      <div style={{ fontWeight: 700, fontSize: 15 }}>
+                        {student.first_name} {student.last_name}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)' }}>
+                        Najstarsza należność: {oldestDate}
+                      </div>
+                    </div>
+                    <div style={{ fontWeight: 800, fontSize: 16, color: 'var(--ios-red)' }}>
+                      {Money.format(totalUnpaid)}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    {smsUrl && (
+                      <a
+                        href={smsUrl}
+                        className="ios-btn ios-btn-secondary"
+                        style={{ flex: 1, textDecoration: 'none', textAlign: 'center', fontSize: 12, minHeight: 32, padding: '6px 8px' }}
+                      >
+                        📱 Przypomnij SMS
+                      </a>
+                    )}
+                    {waUrl && (
+                      <a
+                        href={waUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="ios-btn ios-btn-secondary"
+                        style={{ flex: 1, textDecoration: 'none', textAlign: 'center', fontSize: 12, minHeight: 32, padding: '6px 8px', color: '#25D366' }}
+                      >
+                        💬 WhatsApp
+                      </a>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

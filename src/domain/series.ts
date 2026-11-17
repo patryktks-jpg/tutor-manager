@@ -1,4 +1,5 @@
 import { Lesson, LessonSeries } from './types';
+import { checkPolishHoliday } from './holidays';
 
 /**
  * Common Polish public holidays for 2026/2027
@@ -86,7 +87,7 @@ export function generateSeriesOccurrences(
     const dateStr = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`;
 
     if (series.exceptions && series.exceptions.includes(dateStr)) continue;
-    if (skipHolidays && POLISH_HOLIDAYS_2026.includes(dateStr)) continue;
+    if (skipHolidays && (checkPolishHoliday(dateStr).isHoliday || POLISH_HOLIDAYS_2026.includes(dateStr))) continue;
     if (series.to_date && dateStr > series.to_date) break;
     if (dateStr < series.from_date) continue;
 

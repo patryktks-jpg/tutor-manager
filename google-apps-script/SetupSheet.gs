@@ -52,7 +52,7 @@ function initializeAllSheets() {
       'version', 'created_at', 'updated_at'
     ],
     income_entries: [
-      'id', 'number', 'service_date', 'accrual_date', 'received_date', 'student_id',
+      'id', 'charge_id', 'number', 'service_date', 'accrual_date', 'received_date', 'student_id',
       'service_type', 'amount_due', 'amount_received', 'method', 'status',
       'period_id', 'version', 'created_at', 'updated_at', 'lesson_id'
     ],
@@ -165,3 +165,21 @@ function setupTriggers() {
       .create();
   }
 }
+
+/**
+ * A1 [P0]: Wymusza format tekstowy (@) na wszystkich kolumnach i wierszach
+ * we wszystkich arkuszach, zapobiegając zamianie stringów ISO na obiekty Date.
+ */
+function fixFormats() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var sheets = ss.getSheets();
+  for (var i = 0; i < sheets.length; i++) {
+    var sheet = sheets[i];
+    var maxRows = sheet.getMaxRows();
+    var maxCols = sheet.getMaxColumns();
+    if (maxRows > 1 && maxCols > 0) {
+      sheet.getRange(2, 1, maxRows - 1, maxCols).setNumberFormat('@');
+    }
+  }
+}
+
