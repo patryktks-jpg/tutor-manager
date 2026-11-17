@@ -13,7 +13,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
   const {
     settings,
     activeLegalParam,
+    offlineQueueCount,
     rejectedOperations,
+    retryRejectedOperation,
+    retryAllRejectedOperations,
+    dismissRejectedOperation,
     clearAllRejectedOperations,
     updateSettings,
     updateLegalParams,
@@ -346,27 +350,89 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose }) => {
             >
               <IconRefresh size={16} /> Pobierz czyste dane z Arkusza (Napraw sumy)
             </button>
-            {settings.last_sync_at && (
-              <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)', marginTop: 4, textAlign: 'center' }}>
-                Ostatnia synchronizacja: {new Date(settings.last_sync_at).toLocaleString('pl-PL')}
+            <div style={{ marginTop: 12, padding: 10, borderRadius: 10, background: 'var(--ios-bg)', border: '1px solid var(--ios-border)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, marginBottom: 4 }}>
+                <span style={{ color: 'var(--ios-text-secondary)' }}>Oczekujące w kolejce offline:</span>
+                <span style={{ fontWeight: 600 }}>{offlineQueueCount} operacji</span>
               </div>
-            )}
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                <span style={{ color: 'var(--ios-text-secondary)' }}>Ostatnia udana synchronizacja:</span>
+                <span style={{ fontWeight: 600 }}>
+                  {settings.last_sync_at ? new Date(settings.last_sync_at).toLocaleString('pl-PL') : 'Brak danych'}
+                </span>
+              </div>
+            </div>
 
             {rejectedOperations.length > 0 && (
-              <div style={{ marginTop: 10, padding: 8, borderRadius: 8, background: 'rgba(255,59,48,0.1)', border: '1px solid rgba(255,59,48,0.3)' }}>
-                <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--ios-red)', marginBottom: 4 }}>
-                  ⚠️ Odrzucone operacje w Arkuszu: {rejectedOperations.length}
+              <div style={{ marginTop: 12, padding: 12, borderRadius: 12, background: 'rgba(255,59,48,0.08)', border: '1px solid rgba(255,59,48,0.3)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ios-red)' }}>
+                    ⚠️ Odrzucone operacje ({rejectedOperations.length})
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      onClick={retryAllRejectedOperations}
+                      className="ios-btn ios-btn-primary"
+                      style={{ fontSize: 11, padding: '3px 8px', minHeight: 24 }}
+                    >
+                      Ponów wszystkie
+                    </button>
+                    <button
+                      onClick={clearAllRejectedOperations}
+                      className="ios-btn ios-btn-secondary"
+                      style={{ fontSize: 11, padding: '3px 8px', minHeight: 24, color: 'var(--ios-red)' }}
+                    >
+                      Wyczyść
+                    </button>
+                  </div>
                 </div>
-                <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)', marginBottom: 6 }}>
-                  Serwer Google Apps Script odrzucił te operacje (np. zamknięty okres lub konflikt wersji).
+                <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)', marginBottom: 8 }}>
+                  Operacje odrzucone przez Google Apps Script. Kliknij „Ponów”, aby przesłać je ponownie do Arkusza.
                 </div>
-                <button
-                  onClick={clearAllRejectedOperations}
-                  className="ios-btn ios-btn-secondary"
-                  style={{ width: '100%', fontSize: 11, padding: '4px 8px', color: 'var(--ios-red)' }}
-                >
-                  Wyczyść listę odrzuconych operacji
-                </button>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 220, overflowY: 'auto' }}>
+                  {rejectedOperations.map(op => (
+                    <div
+                      key={op.op_id}
+                      style={{
+                        padding: 8,
+                        borderRadius: 8,
+                        background: 'var(--ios-card-bg)',
+                        border: '1px solid var(--ios-border)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 4
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase' }}>
+                          {op.action} • {op.table}
+                        </span>
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          <button
+                            onClick={() => retryRejectedOperation(op.op_id)}
+                            className="ios-btn ios-btn-primary"
+                            style={{ fontSize: 11, padding: '2px 8px', minHeight: 22 }}
+                          >
+                            Ponów
+                          </button>
+                          <button
+                            onClick={() => dismissRejectedOperation(op.op_id)}
+                            className="ios-btn ios-btn-secondary"
+                            style={{ fontSize: 11, padding: '2px 8px', minHeight: 22, color: 'var(--ios-red)' }}
+                          >
+                            Odrzuć
+                          </button>
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--ios-red)', fontWeight: 500 }}>
+                        {op.error || 'Błąd zapisu w Arkuszu'}
+                      </div>
+                      <div style={{ fontSize: 10, color: 'var(--ios-text-secondary)' }}>
+                        {op.timestamp.slice(0, 19).replace('T', ' ')}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
           </div>

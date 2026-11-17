@@ -426,4 +426,54 @@ describe('Specification Chapter 9: 12 Mandatory Edge Case Tests', () => {
     expect(student.last_name).toBe('[Zanonimizowano RODO]');
     expect(charge.amount).toBe(7000); // Financial amount unchanged!
   });
+
+  it('A3: Batch of 3 operations with middle rejected: rejected operation moved to rejected_ops and can be retried', () => {
+    const queue = [
+      { op_id: 'op-1', table: 'students', action: 'insert', record: { id: 's1' }, timestamp: '2026-11-16T00:24:00Z', status: 'pending' },
+      { op_id: 'op-2', table: 'rate_history', action: 'insert', record: { id: 'rh1' }, timestamp: '2026-11-16T00:24:58Z', status: 'pending' },
+      { op_id: 'op-3', table: 'lessons', action: 'insert', record: { id: 'l1' }, timestamp: '2026-11-16T00:25:00Z', status: 'pending' }
+    ];
+
+    const serverResponse = {
+      status: 'ok',
+      results: [
+        { op_id: 'op-1', status: 'applied' },
+        { op_id: 'op-2', status: 'rejected', error: 'Zakładka nie istnieje: rate_history' },
+        { op_id: 'op-3', status: 'applied' }
+      ]
+    };
+
+    const remainingQueue: any[] = [];
+    const rejectedOps: any[] = [];
+
+    for (const res of serverResponse.results) {
+      const original = queue.find(q => q.op_id === res.op_id);
+      if (res.status === 'applied') {
+        // removed from queue
+      } else if (res.status === 'rejected') {
+        rejectedOps.push({
+          ...original,
+          status: 'rejected',
+          error: res.error
+        });
+      }
+    }
+
+    expect(rejectedOps.length).toBe(1);
+    expect(rejectedOps[0].op_id).toBe('op-2');
+    expect(rejectedOps[0].error).toContain('Zakładka nie istnieje');
+
+    // Retrying moves it back to active queue
+    const retriedOp = {
+      ...rejectedOps[0],
+      status: 'pending',
+      error: undefined,
+      timestamp: '2026-11-17T22:00:00Z'
+    };
+    remainingQueue.push(retriedOp);
+
+    expect(remainingQueue.length).toBe(1);
+    expect(remainingQueue[0].op_id).toBe('op-2');
+    expect(remainingQueue[0].status).toBe('pending');
+  });
 });

@@ -24,6 +24,8 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
     limitStatus,
     todayStr,
     rejectedOperations,
+    retryRejectedOperation,
+    retryAllRejectedOperations,
     dismissRejectedOperation,
     clearAllRejectedOperations,
     completeAndPayLesson,
@@ -644,13 +646,24 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                     <span style={{ fontSize: 13, fontWeight: 700, textTransform: 'uppercase' }}>
                       {op.action} • {op.table}
                     </span>
-                    <button
-                      onClick={() => dismissRejectedOperation(op.op_id)}
-                      className="ios-btn ios-btn-secondary"
-                      style={{ padding: '2px 8px', fontSize: 11, minHeight: 24, color: 'var(--ios-red)' }}
-                    >
-                      Usuń
-                    </button>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        onClick={async () => {
+                          await retryRejectedOperation(op.op_id);
+                        }}
+                        className="ios-btn ios-btn-primary"
+                        style={{ padding: '2px 10px', fontSize: 11, minHeight: 24 }}
+                      >
+                        Ponów
+                      </button>
+                      <button
+                        onClick={() => dismissRejectedOperation(op.op_id)}
+                        className="ios-btn ios-btn-secondary"
+                        style={{ padding: '2px 8px', fontSize: 11, minHeight: 24, color: 'var(--ios-red)' }}
+                      >
+                        Usuń
+                      </button>
+                    </div>
                   </div>
                   <div style={{ fontSize: 12, color: 'var(--ios-red)', fontWeight: 600, marginBottom: 4 }}>
                     Powód: {op.error || 'Odrzucono przez serwer'}
@@ -662,25 +675,37 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
               ))}
             </div>
 
-            <div style={{ marginTop: 16, display: 'flex', gap: 8 }}>
+            <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  className="ios-btn ios-btn-primary"
+                  style={{ flex: 1 }}
+                  onClick={async () => {
+                    await retryAllRejectedOperations();
+                    setShowRejectedModal(false);
+                  }}
+                >
+                  Ponów wszystkie ({rejectedOperations.length})
+                </button>
+                <button
+                  className="ios-btn ios-btn-secondary"
+                  style={{ flex: 1, color: 'var(--ios-red)' }}
+                  onClick={async () => {
+                    if (confirm('Czy na pewno chcesz usunąć wszystkie odrzucone operacje z listy?')) {
+                      await clearAllRejectedOperations();
+                      setShowRejectedModal(false);
+                    }
+                  }}
+                >
+                  Wyczyść wszystkie
+                </button>
+              </div>
               <button
                 className="ios-btn ios-btn-secondary"
-                style={{ flex: 1, color: 'var(--ios-red)' }}
-                onClick={async () => {
-                  if (confirm('Czy na pewno chcesz usunąć wszystkie odrzucone operacje z listy?')) {
-                    await clearAllRejectedOperations();
-                    setShowRejectedModal(false);
-                  }
-                }}
-              >
-                Wyczyść wszystkie
-              </button>
-              <button
-                className="ios-btn ios-btn-primary"
-                style={{ flex: 1 }}
+                style={{ width: '100%' }}
                 onClick={() => setShowRejectedModal(false)}
               >
-                Rozumiem
+                Zamknij
               </button>
             </div>
           </div>

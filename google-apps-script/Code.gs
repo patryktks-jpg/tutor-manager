@@ -223,7 +223,16 @@ function applySingleOperation(ss, op, sheetCache, processedOpsSet) {
 
   var sheet = ss.getSheetByName(op.table);
   if (!sheet) {
-    throw new Error('Zakładka nie istnieje: ' + op.table);
+    sheet = ss.insertSheet(op.table);
+    var defaultHeaders = Object.keys(record);
+    if (defaultHeaders.indexOf('id') === -1) defaultHeaders.unshift('id');
+    if (defaultHeaders.indexOf('version') === -1) defaultHeaders.push('version');
+    if (defaultHeaders.indexOf('created_at') === -1) defaultHeaders.push('created_at');
+    if (defaultHeaders.indexOf('updated_at') === -1) defaultHeaders.push('updated_at');
+    sheet.appendRow(defaultHeaders);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, defaultHeaders.length).setFontWeight('bold');
+    sheetCache[op.table] = [defaultHeaders];
   }
 
   var data = sheetCache[op.table] || sheet.getDataRange().getValues();

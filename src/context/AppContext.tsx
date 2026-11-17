@@ -82,6 +82,8 @@ interface AppContextValue {
 
   // Sync & Data management
   rejectedOperationsCount: number;
+  retryRejectedOperation: (opId: UUID) => Promise<void>;
+  retryAllRejectedOperations: () => Promise<void>;
   dismissRejectedOperation: (opId: UUID) => Promise<void>;
   clearAllRejectedOperations: () => Promise<void>;
   syncStatus: { isSyncing: boolean; message: string; lastResult?: SyncResult };
@@ -1040,6 +1042,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await refreshFromIDB();
   }, [refreshFromIDB]);
 
+  const retryRejectedOperation = useCallback(async (opId: UUID) => {
+    const db = await IDBManager.getDB();
+    const op = await IDBManager.get<OfflineOperation>(db, 'rejected_operations', opId);
+    if (op) {
+      await IDBManager.delete('rejected_operations', opId);
+      const queuedOp = await IDBManager.queueOperation(op.table, op.action, op.record);
+      setRejectedOperations(prev => prev.filter(o => o.op_id !== opId));
+      setOfflineQueue(prev => [...prev, queuedOp]);
+      await syncNow();
+    }
+  }, [syncNow]);
+
+  const retryAllRejectedOperations = useCallback(async () => {
+    const db = await IDBManager.getDB();
+    const allRejected = await IDBManager.getAll<OfflineOperation>(db, 'rejected_operations');
+    const newQueued: OfflineOperation[] = [];
+    for (const op of allRejected) {
+      await IDBManager.delete('rejected_operations', op.op_id);
+      const queuedOp = await IDBManager.queueOperation(op.table, op.action, op.record);
+      newQueued.push(queuedOp);
+    }
+    setRejectedOperations([]);
+    setOfflineQueue(prev => [...prev, ...newQueued]);
+    await syncNow();
+  }, [syncNow]);
+
   const dismissRejectedOperation = useCallback(async (opId: UUID) => {
     await IDBManager.delete('rejected_operations', opId);
     setRejectedOperations(prev => prev.filter(op => op.op_id !== opId));
@@ -1110,6 +1138,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     acceptLegalDeclaration,
     dismissRejectedOperation,
     clearAllRejectedOperations,
+    retryRejectedOperation,
+    retryAllRejectedOperations,
     syncStatus,
     syncNow,
     forcePushAll,
@@ -1166,6 +1196,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     acceptLegalDeclaration,
     dismissRejectedOperation,
     clearAllRejectedOperations,
+    retryRejectedOperation,
+    retryAllRejectedOperations,
     syncStatus,
     syncNow,
     forcePushAll,
