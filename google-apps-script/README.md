@@ -39,3 +39,19 @@ Zgodnie z zasadami bezpieczeństwa, tajny token nie jest trzymany jawnie w kodzi
    - **SECRET_TOKEN** (ten sam, który podałeś we Właściwościach skryptu)
 4. Kliknij **Testuj połączenie** (zielony komunikat potwierdza działanie bez problemów z CORS).
 5. Kliknij **Zapisz URL**.
+
+---
+
+## 🔒 Kluczowe zalecenia bezpieczeństwa i ochrona danych (RODO)
+
+1. **Nigdy nie publikuj URL Web App ani SECRET_TOKEN:**
+   - Nie umieszczaj ich w repozytorium GitHub, plikach `README`, kodzie ani publicznych zgłoszeniach (Issues).
+2. **Prywatność Arkusza Google na Dysku:**
+   - W Arkuszu Google kliknij w prawym górnym rogu **Udostępnij** (Share).
+   - Upewnij się, że **Dostęp ogólny** jest ustawiony na **„Ograniczony”** (tylko Ty masz dostęp), a **NIE** „Każda osoba mająca link”.
+3. **Prywatność folderów raportów i kopii:**
+   - Skrypt `Code.gs` automatycznie ustawia dostęp `PRIVATE` dla generowanych folderów `TutorManager_Raporty` oraz `TutorManager_Kopie_Zapasowe`.
+4. **Weryfikacja dwuetapowa (2FA):**
+   - Zadbaj o włączenie weryfikacji dwuetapowej na swoim koncie Google ([myaccount.google.com/security](https://myaccount.google.com/security)), aby nikt niepowołany nie przejął Twojego Dysku Google.
+5. **Rotacja tokenu:**
+   - W razie potrzeby zmiany hasła: zmień wartość `SECRET_TOKEN` we Właściwościach skryptu, zaktualizuj wdrożenie (Nowa wersja) i wpisz nowy token w aplikacji w telefonie.

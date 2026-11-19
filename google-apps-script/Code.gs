@@ -405,6 +405,10 @@ function generateReportFiles(ss, periodId, reportData) {
   var folderName = 'TutorManager_Raporty';
   var folders = DriveApp.getFoldersByName(folderName);
   var targetFolder = folders.hasNext() ? folders.next() : DriveApp.createFolder(folderName);
+  // Bezpieczeństwo: folder raportów dostępny wyłącznie dla właściciela konta (brak dostępu publicznego)
+  try {
+    targetFolder.setSharing(DriveApp.Access.PRIVATE, DriveApp.Permission.NONE);
+  } catch (e) {}
 
   // Bezpieczna obsługa pustego reportData (PUNKT 4 FIX)
   reportData = reportData || {};
@@ -497,10 +501,17 @@ function createDailyBackup() {
   var folderName = 'TutorManager_Kopie_Zapasowe';
   var folders = DriveApp.getFoldersByName(folderName);
   var targetFolder = folders.hasNext() ? folders.next() : DriveApp.createFolder(folderName);
+  // Bezpieczeństwo: folder kopii zapasowych dostępny wyłącznie dla właściciela konta (brak dostępu publicznego)
+  try {
+    targetFolder.setSharing(DriveApp.Access.PRIVATE, DriveApp.Permission.NONE);
+  } catch (e) {}
 
   var dateStr = Utilities.formatDate(new Date(), 'Europe/Warsaw', 'yyyy-MM-dd_HH-mm');
   var copyName = 'Kopia_TutorManager_' + dateStr;
-  file.makeCopy(copyName, targetFolder);
+  var copyFile = file.makeCopy(copyName, targetFolder);
+  try {
+    copyFile.setSharing(DriveApp.Access.PRIVATE, DriveApp.Permission.NONE);
+  } catch (e) {}
 
   var existingFiles = targetFolder.getFiles();
   var list = [];
