@@ -7,7 +7,7 @@ import { getWarsawWeekRange } from '../../domain/dateUtils';
 import { generateSmsLink, generateWhatsAppLink, buildPaymentReminderText } from '../../domain/reminders';
 import { SwipeableCard } from '../common/SwipeableCard';
 import { NotificationBanner } from '../common/NotificationBanner';
-import { IconGear, IconCheck, IconX, IconCalendar, IconStudents } from '../common/Icons';
+import { IconGear, IconCheck, IconX, IconCalendar, IconStudents, IconRefresh } from '../common/Icons';
 
 interface StartViewProps {
   onOpenSettings: () => void;
@@ -118,8 +118,8 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
 
   // Check payment status of each lesson
   const balanceMap = useMemo(() => {
-    return getChargesBalance(charges, paymentAllocations);
-  }, [charges, paymentAllocations]);
+    return getChargesBalance(charges, paymentAllocations, payments);
+  }, [charges, paymentAllocations, payments]);
 
   // Past unconfirmed lessons (start_at < todayStr and not yet completed/cancelled) (B1)
   const unconfirmedLessons = useMemo(() => {
@@ -677,26 +677,53 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                 </div>
               )}
 
+              {/* Revert / Un-cancel button for cancelled lessons */}
+              {(selectedLesson.status === 'cancelled_student' ||
+                selectedLesson.status === 'cancelled_tutor' ||
+                selectedLesson.status === 'no_show') && (
+                <button
+                  className="ios-btn ios-btn-primary"
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontWeight: 700 }}
+                  onClick={async () => {
+                    await updateLessonStatus(selectedLesson.id, 'planned');
+                    setShowActionModal(false);
+                  }}
+                >
+                  <IconRefresh size={18} /> Przywróć lekcję (jako zaplanowaną)
+                </button>
+              )}
+
               {selectedLesson.status === 'completed' && (() => {
                 const charge = charges.find(c => c.lesson_id === selectedLesson.id && c.amount > 0);
                 const isPaid = charge ? balanceMap.get(charge.id)?.status === 'paid' : false;
-                if (isPaid) {
-                  return (
-                    <div style={{ padding: '10px 12px', borderRadius: 10, background: 'rgba(52,199,89,0.15)', color: 'var(--ios-green)', fontWeight: 700, fontSize: 13, textAlign: 'center' }}>
-                      ✓ Lekcja jest w pełni opłacona
-                    </div>
-                  );
-                }
                 return (
-                  <button
-                    className="ios-btn ios-btn-success"
-                    onClick={() => {
-                      setShowActionModal(false);
-                      setShowPayModal(true);
-                    }}
-                  >
-                    <IconCheck size={18} /> Zarejestruj wpłatę
-                  </button>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {isPaid ? (
+                      <div style={{ padding: '10px 12px', borderRadius: 10, background: 'rgba(52,199,89,0.15)', color: 'var(--ios-green)', fontWeight: 700, fontSize: 13, textAlign: 'center' }}>
+                        ✓ Lekcja jest w pełni opłacona
+                      </div>
+                    ) : (
+                      <button
+                        className="ios-btn ios-btn-success"
+                        onClick={() => {
+                          setShowActionModal(false);
+                          setShowPayModal(true);
+                        }}
+                      >
+                        <IconCheck size={18} /> Zarejestruj wpłatę
+                      </button>
+                    )}
+                    <button
+                      className="ios-btn ios-btn-secondary"
+                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                      onClick={async () => {
+                        await updateLessonStatus(selectedLesson.id, 'planned');
+                        setShowActionModal(false);
+                      }}
+                    >
+                      <IconRefresh size={16} /> Cofnij do zaplanowanej
+                    </button>
+                  </div>
                 );
               })()}
 

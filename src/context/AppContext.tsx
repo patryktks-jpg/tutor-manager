@@ -27,9 +27,8 @@ import { IDBManager } from '../db/idb';
 import { syncWithGas, testGasConnection, forcePushAllData, pullCleanFromGas as pullCleanFromGasSync, exportReportViaGas, syncLessonToCalendarViaGas, SyncResult } from '../db/sync';
 import { calculateQuarterLimitStatus, LimitStatus } from '../domain/limit';
 import { proposeFifoAllocation } from '../domain/allocation';
-import { assessCancellation, DEFAULT_CANCEL_POLICY } from '../domain/cancelPolicy';
 import { buildMonthlyReport, createSnapshotRecord } from '../domain/periods';
-import { buildCompleteAndPayPayload } from '../domain/lessonOps';
+import { buildCompleteAndPayPayload, buildLessonStatusChangePayload } from '../domain/lessonOps';
 
 interface AppContextValue {
   isReady: boolean;
@@ -193,6 +192,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
+    // Usunięcie osieroconych alokacji płatności (brak odpowiadającej płatności w payments)
+    const paymentIds = new Set(data.payments.map(p => p.id));
+    const cleanAllocations: PaymentAllocation[] = [];
+    const orphanAllocIds: string[] = [];
+
+    for (const alloc of data.payment_allocations) {
+      if (paymentIds.has(alloc.payment_id)) {
+        cleanAllocations.push(alloc);
+      } else {
+        orphanAllocIds.push(alloc.id);
+      }
+    }
+
+    if (orphanAllocIds.length > 0) {
+      for (const oId of orphanAllocIds) {
+        await IDBManager.delete('payment_allocations', oId);
+      }
+    }
+
     setStudents(data.students);
     setGuardians(data.guardians);
     setRateHistory(data.rate_history);
@@ -201,7 +219,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setLessonEvents(data.lesson_events);
     setCharges(cleanCharges);
     setPayments(data.payments);
-    setPaymentAllocations(data.payment_allocations);
+    setPaymentAllocations(cleanAllocations);
     setPackages(data.packages);
     setIncomeEntries(data.income_entries);
     setLegalParams(data.legal_params);
@@ -425,8 +443,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       nowIso
     );
 
-    // Idempotency: jeśli lekcja była już opłacona, nic nie rób
+    // Idempotency: jeśli lekcja była już opłacona, zaktualizuj jedynie status lekcji (jeśli nie był completed)
     if (payload.isAlreadyPaid) {
+      if (lesson.status !== 'completed') {
+        await commitChange('lessons', 'update', payload.updatedLesson);
+        setLessons(prev => prev.map(l => l.id === lessonId ? payload.updatedLesson : l));
+      }
       return;
     }
 
@@ -680,52 +702,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const nowIso = new Date().toISOString();
-    const updatedLesson: Lesson = {
-      ...lesson,
+    const lessonDate = lesson.start_at.slice(0, 10);
+    const year = Number(lessonDate.slice(0, 4));
+    const nextIncomeNum = getNextIncomeNumber(year);
+
+    const payload = buildLessonStatusChangePayload(
+      lesson,
       status,
-      notes: note ? `${lesson.notes ? lesson.notes + '\n' : ''}${note}` : lesson.notes,
-      version: lesson.version + 1,
-      updated_at: nowIso
-    };
-
-    await commitChange('lessons', 'update', updatedLesson);
-    setLessons(prev => prev.map(l => l.id === lessonId ? updatedLesson : l));
-
-    // Handle cancellation fee if applicable
-    if (status === 'cancelled_student' || status === 'no_show') {
-      const assessment = assessCancellation(lesson, nowIso, DEFAULT_CANCEL_POLICY, status === 'no_show');
-      if (!assessment.isFree && assessment.feeGrosze > 0) {
-        const cancelCharge: Charge = {
-          id: generateUUID(),
-          student_id: lesson.student_id,
-          lesson_id: lesson.id,
-          amount: assessment.feeGrosze,
-          accrual_date: lesson.start_at.slice(0, 10),
-          charge_type: 'paid_cancellation',
-          description: assessment.reason,
-          version: 1,
-          created_at: nowIso,
-          updated_at: nowIso
-        };
-        await commitChange('charges', 'insert', cancelCharge);
-        setCharges(prev => [...prev, cancelCharge]);
-
-        // Create IncomeEntry for late cancellation fee (A4)
-        const year = Number(cancelCharge.accrual_date.slice(0, 4));
-        const formattedNum = getNextIncomeNumber(year);
-        const cancelIncome = deriveIncomeEntry({
-          charge: cancelCharge,
-          allocations: [],
-          payments: [],
-          existingEntry: null,
-          number: formattedNum,
-          nowIso
-        });
-        await commitChange('income_entries', 'insert', cancelIncome);
-        setIncomeEntries(prev => [...prev, cancelIncome]);
+      charges,
+      paymentAllocations,
+      incomeEntries,
+      {
+        note,
+        nowIso,
+        nextIncomeNumber: nextIncomeNum
       }
+    );
+
+    // 1. Update lesson
+    await commitChange('lessons', 'update', payload.updatedLesson);
+    setLessons(prev => prev.map(l => l.id === lessonId ? payload.updatedLesson : l));
+
+    // 2. Commit storno charges if any (pure append-only financial reversal)
+    for (const sc of payload.stornoCharges) {
+      await commitChange('charges', 'insert', sc);
+      setCharges(prev => [...prev, sc]);
     }
-  }, [lessons, markLessonCompleted, assertNotClosedPeriod, commitChange]);
+
+    // 3. Update income entries if any (zeroed out by storno)
+    for (const ue of payload.updatedIncomeEntries) {
+      await commitChange('income_entries', 'update', ue);
+      setIncomeEntries(prev => prev.map(e => e.id === ue.id ? ue : e));
+    }
+
+    // 4. New cancellation fee charge if assessed
+    if (payload.newCancellationCharge) {
+      await commitChange('charges', 'insert', payload.newCancellationCharge);
+      setCharges(prev => [...prev, payload.newCancellationCharge!]);
+    }
+
+    // 5. New cancellation income entry if assessed
+    if (payload.newCancellationIncomeEntry) {
+      await commitChange('income_entries', 'insert', payload.newCancellationIncomeEntry);
+      setIncomeEntries(prev => [...prev, payload.newCancellationIncomeEntry!]);
+    }
+  }, [lessons, charges, paymentAllocations, incomeEntries, markLessonCompleted, assertNotClosedPeriod, commitChange, getNextIncomeNumber]);
 
   const rescheduleLesson = useCallback(async (lessonId: UUID, newStartIso: string) => {
     const lesson = lessons.find(l => l.id === lessonId);

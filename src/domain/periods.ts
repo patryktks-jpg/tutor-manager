@@ -75,7 +75,7 @@ export function buildMonthlyReport(
   const receivedRevenueGrosze = periodPayments.reduce((sum, p) => p.payment_type === 'wplata' ? sum + p.amount : sum - p.amount, 0);
 
   // Exact unpaid calculation: sum of remaining unpaid balances of charges accrued in this period
-  const balanceMap = getChargesBalance(charges, allocations);
+  const balanceMap = getChargesBalance(charges, allocations, payments);
   let unpaidGrosze = 0;
   for (const c of periodCharges) {
     const b = balanceMap.get(c.id);

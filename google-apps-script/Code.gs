@@ -139,6 +139,11 @@ function doPost(e) {
       return jsonResponse({ status: 'ok', calendar_event_id: calRes });
     }
 
+    if (body.action === 'cleanup_duplicates') {
+      var cleanupRes = cleanupDatabaseDuplicates(ss);
+      return jsonResponse({ status: 'ok', report: cleanupRes });
+    }
+
     return jsonResponse({ status: 'error', message: 'Nieznana akcja POST' });
   } catch (err) {
     return jsonResponse({ status: 'error', message: err.toString() });
@@ -275,8 +280,8 @@ function applySingleOperation(ss, op, sheetCache, processedOpsSet) {
     return { op_id: op.op_id, status: 'already_processed' };
   }
 
-  // Idempotencja po lesson_id dla charges (blokada zdublowanego naliczenia za tę samą lekcję)
-  if (op.table === 'charges' && op.action === 'insert' && record.lesson_id && record.charge_type === 'lesson') {
+  // Idempotencja po lesson_id dla charges (blokada zdublowanego naliczenia za tę samą lekcję; dopuszcza storno z ujemną kwotą)
+  if (op.table === 'charges' && op.action === 'insert' && record.lesson_id && record.charge_type === 'lesson' && Number(record.amount || 0) > 0 && !record.reverses_charge_id) {
     var lessonIdIdx = headers.indexOf('lesson_id');
     var chargeTypeIdx = headers.indexOf('charge_type');
     for (var cr = 1; cr < data.length; cr++) {
@@ -314,15 +319,19 @@ function applySingleOperation(ss, op, sheetCache, processedOpsSet) {
 
   if (op.action === 'insert') {
     sheet.appendRow(rowValues);
+    data.push(rowValues);
   } else if (op.action === 'update') {
     if (rowIndex > 0) {
       sheet.getRange(rowIndex, 1, 1, headers.length).setValues([rowValues]);
+      data[rowIndex - 1] = rowValues;
     } else {
       // Upsert (PUNKT 2 FIX): Rekord nie istnieje jeszcze w arkuszu (np. utworzony offline lub z demo), więc dopisujemy
       sheet.appendRow(rowValues);
+      data.push(rowValues);
     }
   } else if (op.action === 'delete' && rowIndex > 0) {
     sheet.deleteRow(rowIndex);
+    data.splice(rowIndex - 1, 1);
   }
 
   var pSheet = ss.getSheetByName('processed_ops');
@@ -615,4 +624,113 @@ function sendWeeklyTutorAlerts() {
 function jsonResponse(obj, statusCode) {
   return ContentService.createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * Czyści zduplikowane wiersze w arkuszach i usuwa osierocone alokacje płatności.
+ */
+function cleanupDatabaseDuplicates(ss) {
+  var report = { cleaned: {} };
+
+  // 1. Deduplikacja lessons: zachowaj wiersz z najwyższą wersją dla każdego ID
+  var lessonsSheet = ss.getSheetByName('lessons');
+  if (lessonsSheet) {
+    var lData = lessonsSheet.getDataRange().getValues();
+    if (lData.length > 2) {
+      var lHeaders = lData[0];
+      var lIdIdx = lHeaders.indexOf('id');
+      var lVerIdx = lHeaders.indexOf('version');
+      var lRowsToKeep = [lHeaders];
+      var lBestById = {};
+
+      for (var lr = 1; lr < lData.length; lr++) {
+        var lRow = lData[lr];
+        var lid = lRow[lIdIdx];
+        var lver = Number(lRow[lVerIdx]) || 0;
+        if (!lBestById[lid] || lver >= lBestById[lid].version) {
+          lBestById[lid] = { version: lver, row: lRow };
+        }
+      }
+
+      for (var lk in lBestById) {
+        lRowsToKeep.push(lBestById[lk].row);
+      }
+
+      if (lRowsToKeep.length < lData.length) {
+        lessonsSheet.clearContents();
+        lessonsSheet.getRange(1, 1, lRowsToKeep.length, lHeaders.length).setValues(lRowsToKeep);
+        report.cleaned.lessons = lData.length - lRowsToKeep.length;
+      }
+    }
+  }
+
+  // 2. Usunięcie osieroconych alokacji (payment_id nie istnieje w payments)
+  var pmtSheet = ss.getSheetByName('payments');
+  var allocSheet = ss.getSheetByName('payment_allocations');
+  if (pmtSheet && allocSheet) {
+    var pmtData = pmtSheet.getDataRange().getValues();
+    var allocData = allocSheet.getDataRange().getValues();
+    if (pmtData.length > 1 && allocData.length > 1) {
+      var pmtHeaders = pmtData[0];
+      var pmtIdIdx = pmtHeaders.indexOf('id');
+      var validPmts = {};
+      for (var pi = 1; pi < pmtData.length; pi++) {
+        validPmts[pmtData[pi][pmtIdIdx]] = true;
+      }
+
+      var allocHeaders = allocData[0];
+      var aPmtIdIdx = allocHeaders.indexOf('payment_id');
+      var validAllocs = [allocHeaders];
+      var removedAllocs = 0;
+
+      for (var ai = 1; ai < allocData.length; ai++) {
+        var pId = allocData[ai][aPmtIdIdx];
+        if (validPmts[pId]) {
+          validAllocs.push(allocData[ai]);
+        } else {
+          removedAllocs++;
+        }
+      }
+
+      if (removedAllocs > 0) {
+        allocSheet.clearContents();
+        allocSheet.getRange(1, 1, validAllocs.length, allocHeaders.length).setValues(validAllocs);
+        report.cleaned.payment_allocations = removedAllocs;
+      }
+    }
+  }
+
+  // 3. Deduplikacja income_entries po ID: zachowaj najwyższą wersję
+  var incomeSheet = ss.getSheetByName('income_entries');
+  if (incomeSheet) {
+    var incData = incomeSheet.getDataRange().getValues();
+    if (incData.length > 2) {
+      var incHeaders = incData[0];
+      var incIdIdx = incHeaders.indexOf('id');
+      var incVerIdx = incHeaders.indexOf('version');
+      var incRows = [incHeaders];
+      var bestInc = {};
+
+      for (var ir = 1; ir < incData.length; ir++) {
+        var iRow = incData[ir];
+        var iId = iRow[incIdIdx];
+        var iVer = Number(iRow[incVerIdx]) || 0;
+        if (!bestInc[iId] || iVer >= bestInc[iId].version) {
+          bestInc[iId] = { version: iVer, row: iRow };
+        }
+      }
+
+      for (var ik in bestInc) {
+        incRows.push(bestInc[ik].row);
+      }
+
+      if (incRows.length < incData.length) {
+        incomeSheet.clearContents();
+        incomeSheet.getRange(1, 1, incRows.length, incHeaders.length).setValues(incRows);
+        report.cleaned.income_entries = incData.length - incRows.length;
+      }
+    }
+  }
+
+  return report;
 }

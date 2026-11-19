@@ -160,7 +160,29 @@ export async function syncWithGas(
         if (table === 'settings') continue; // Nigdy nie nadpisuj lokalnych ustawień bezpieczeństwa z arkusza!
         const rows = pullJson.data[table];
         if (Array.isArray(rows)) {
+          // Deduplikacja rekordów z arkusza po ID – wybieramy najwyższą wersję (ochrona przed zduplikowanymi wierszami w arkuszu)
+          const dedupedMap = new Map<string, any>();
           for (const row of rows) {
+            if (!row || !row.id) continue;
+            const existing = dedupedMap.get(row.id);
+            if (!existing) {
+              dedupedMap.set(row.id, row);
+            } else {
+              const curVer = Number(existing.version) || 0;
+              const newVer = Number(row.version) || 0;
+              if (newVer > curVer || (newVer === curVer && (row.updated_at || '') >= (existing.updated_at || ''))) {
+                dedupedMap.set(row.id, row);
+              }
+            }
+          }
+
+          for (const row of dedupedMap.values()) {
+            // Ochrona lokalnych zmian w IndexedDB: nie nadpisuj nowszego stanu lokalnego starszą wersją z arkusza
+            const localRecord = await IDBManager.get<any>(db, table, row.id);
+            if (localRecord && Number(localRecord.version || 0) > Number(row.version || 0)) {
+              continue;
+            }
+
             await IDBManager.put(table, row);
             pulledCount++;
             if (row.updated_at && row.updated_at > maxUpdatedAt) {

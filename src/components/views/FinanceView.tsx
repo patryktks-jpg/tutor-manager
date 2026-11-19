@@ -18,12 +18,12 @@ export const FinanceView: React.FC = () => {
 
   // Charges balance & age of debt
   const openCharges = useMemo(() => {
-    const balanceMap = getChargesBalance(charges, paymentAllocations);
+    const balanceMap = getChargesBalance(charges, paymentAllocations, payments);
     const list = Array.from(balanceMap.values()).filter(b => b.remainingAmount > 0);
 
     // Sort by oldest accrual_date first (age of debt)
     return list.sort((a, b) => a.charge.accrual_date.localeCompare(b.charge.accrual_date));
-  }, [charges, paymentAllocations]);
+  }, [charges, paymentAllocations, payments]);
 
   // Group open charges by student (B2)
   const openDebtsByStudent = useMemo(() => {

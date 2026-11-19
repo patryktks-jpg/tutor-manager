@@ -448,60 +448,145 @@ export const CalendarView: React.FC = () => {
       )}
 
       {/* Reschedule / Manage Lesson Modal */}
-      {showRescheduleModal && selectedLesson && (
-        <div className="ios-modal-overlay" onClick={() => setShowRescheduleModal(false)}>
-          <div className="ios-modal-content" onClick={e => e.stopPropagation()}>
-            <div className="ios-modal-grabber" />
-            <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Edycja terminu lekcji</h3>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              <div>
-                <label style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 4 }}>
-                  Nowa data i godzina rozpoczęcia:
-                </label>
-                <input
-                  type="datetime-local"
-                  className="ios-input"
-                  value={newRescheduleTime}
-                  onChange={e => setNewRescheduleTime(e.target.value)}
-                />
+      {showRescheduleModal && selectedLesson && (() => {
+        const selectedStudent = students.find(s => s.id === selectedLesson.student_id);
+        const statusLabel = {
+          planned: '🗓 Zaplanowana',
+          needs_confirmation: '⚠️ Do potwierdzenia',
+          completed: '✓ Odbyta (zrealizowana)',
+          cancelled_student: '✕ Odwołana przez ucznia',
+          cancelled_tutor: '✕ Odwołana przez Ciebie',
+          no_show: '✕ Nieobecność ucznia'
+        }[selectedLesson.status] || selectedLesson.status;
+
+        const isCancelled = selectedLesson.status === 'cancelled_student' ||
+          selectedLesson.status === 'cancelled_tutor' ||
+          selectedLesson.status === 'no_show';
+
+        return (
+          <div className="ios-modal-overlay" onClick={() => setShowRescheduleModal(false)}>
+            <div className="ios-modal-content" onClick={e => e.stopPropagation()}>
+              <div className="ios-modal-grabber" />
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <h3 style={{ fontSize: 18, fontWeight: 700 }}>Zarządzanie lekcją</h3>
+                  <span
+                    style={{
+                      fontSize: 12,
+                      fontWeight: 700,
+                      padding: '3px 8px',
+                      borderRadius: 6,
+                      backgroundColor: isCancelled ? 'rgba(255,59,48,0.12)' : selectedLesson.status === 'completed' ? 'rgba(52,199,89,0.12)' : 'var(--ios-border)',
+                      color: isCancelled ? 'var(--ios-red)' : selectedLesson.status === 'completed' ? 'var(--ios-green)' : 'var(--ios-text-secondary)'
+                    }}
+                  >
+                    {statusLabel}
+                  </span>
+                </div>
+                <div style={{ fontSize: 14, color: 'var(--ios-text-secondary)', marginTop: 4 }}>
+                  {selectedStudent ? `${selectedStudent.first_name} ${selectedStudent.last_name}` : 'Uczeń'} • {selectedLesson.subject} ({selectedLesson.duration_min} min, {Money.format(selectedLesson.price_snapshot)})
+                </div>
               </div>
 
-              <button
-                className="ios-btn ios-btn-primary"
-                onClick={async () => {
-                  if (newRescheduleTime) {
-                    await rescheduleLesson(selectedLesson.id, `${newRescheduleTime}:00`);
-                    setShowRescheduleModal(false);
-                  }
-                }}
-              >
-                Zatwierdź przesunięcie (zapisz w historii)
-              </button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div>
+                  <label style={{ fontSize: 13, fontWeight: 600, display: 'block', marginBottom: 4 }}>
+                    Przesuń termin lekcji:
+                  </label>
+                  <div style={{ display: 'flex', gap: 8 }}>
+                    <input
+                      type="datetime-local"
+                      className="ios-input"
+                      value={newRescheduleTime}
+                      onChange={e => setNewRescheduleTime(e.target.value)}
+                    />
+                    <button
+                      className="ios-btn ios-btn-primary"
+                      onClick={async () => {
+                        if (newRescheduleTime) {
+                          await rescheduleLesson(selectedLesson.id, `${newRescheduleTime}:00`);
+                          setShowRescheduleModal(false);
+                        }
+                      }}
+                    >
+                      Przesuń
+                    </button>
+                  </div>
+                </div>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 4 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4, borderTop: '1px solid var(--ios-border)', paddingTop: 10 }}>
+                  <label style={{ fontSize: 12, fontWeight: 700, color: 'var(--ios-text-secondary)', textTransform: 'uppercase' }}>
+                    Zmień status lekcji:
+                  </label>
+
+                  {/* Button to restore cancelled lesson */}
+                  {isCancelled && (
+                    <button
+                      className="ios-btn ios-btn-primary"
+                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, fontWeight: 700 }}
+                      onClick={async () => {
+                        await updateLessonStatus(selectedLesson.id, 'planned');
+                        setShowRescheduleModal(false);
+                      }}
+                    >
+                      <IconRefresh size={16} /> Przywróć lekcję (jako zaplanowaną)
+                    </button>
+                  )}
+
+                  {/* Button to un-complete lesson */}
+                  {selectedLesson.status === 'completed' && (
+                    <button
+                      className="ios-btn ios-btn-secondary"
+                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                      onClick={async () => {
+                        await updateLessonStatus(selectedLesson.id, 'planned');
+                        setShowRescheduleModal(false);
+                      }}
+                    >
+                      <IconRefresh size={16} /> Cofnij do zaplanowanej
+                    </button>
+                  )}
+
+                  <div style={{ display: 'grid', gridTemplateColumns: selectedLesson.status === 'completed' || isCancelled ? '1fr' : '1fr 1fr', gap: 8 }}>
+                    {selectedLesson.status !== 'completed' && (
+                      <button
+                        className="ios-btn ios-btn-success"
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                        onClick={async () => {
+                          await updateLessonStatus(selectedLesson.id, 'completed');
+                          setShowRescheduleModal(false);
+                        }}
+                      >
+                        <IconCheck size={16} /> Oznacz jako odbytą
+                      </button>
+                    )}
+                    {!isCancelled && (
+                      <button
+                        className="ios-btn ios-btn-danger"
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                        onClick={async () => {
+                          await updateLessonStatus(selectedLesson.id, 'cancelled_student');
+                          setShowRescheduleModal(false);
+                        }}
+                      >
+                        <IconX size={16} /> Odwołaj
+                      </button>
+                    )}
+                  </div>
+                </div>
+
                 <button
-                  className="ios-btn ios-btn-success"
-                  onClick={async () => {
-                    await updateLessonStatus(selectedLesson.id, 'completed');
-                    setShowRescheduleModal(false);
-                  }}
+                  className="ios-btn"
+                  style={{ backgroundColor: 'transparent', color: 'var(--ios-text-secondary)', marginTop: 4 }}
+                  onClick={() => setShowRescheduleModal(false)}
                 >
-                  <IconCheck size={16} /> Oznacz jako odbytą
-                </button>
-                <button
-                  className="ios-btn ios-btn-danger"
-                  onClick={async () => {
-                    await updateLessonStatus(selectedLesson.id, 'cancelled_student');
-                    setShowRescheduleModal(false);
-                  }}
-                >
-                  <IconX size={16} /> Odwołaj
+                  Zamknij
                 </button>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 };

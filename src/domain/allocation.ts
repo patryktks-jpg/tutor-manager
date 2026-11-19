@@ -27,24 +27,43 @@ export interface StudentFinancialSummary {
  */
 export function getChargesBalance(
   charges: Charge[],
-  allocations: PaymentAllocation[]
+  allocations: PaymentAllocation[],
+  payments?: Payment[]
 ): Map<UUID, ChargeBalance> {
   const map = new Map<UUID, ChargeBalance>();
 
   for (const c of charges) {
+    const isStorno = c.amount <= 0 || !!c.reverses_charge_id;
     map.set(c.id, {
       charge: c,
       allocatedAmount: 0,
-      remainingAmount: c.amount,
-      status: 'unpaid'
+      remainingAmount: isStorno ? 0 : c.amount,
+      status: isStorno ? 'paid' : 'unpaid'
     });
   }
 
+  // Handle storno reversals: both the storno and the reversed charge have remainingAmount = 0
+  for (const c of charges) {
+    if (c.reverses_charge_id) {
+      const reversed = map.get(c.reverses_charge_id);
+      if (reversed) {
+        reversed.remainingAmount = 0;
+        reversed.status = 'paid';
+      }
+    }
+  }
+
+  const validPaymentIds = payments ? new Set(payments.map(p => p.id)) : null;
+
   for (const alloc of allocations) {
+    if (validPaymentIds && !validPaymentIds.has(alloc.payment_id)) {
+      // Ignore orphaned allocations whose payment does not exist
+      continue;
+    }
     const item = map.get(alloc.charge_id);
-    if (item) {
+    if (item && item.charge.amount > 0 && !item.charge.reverses_charge_id) {
       item.allocatedAmount += alloc.amount;
-      item.remainingAmount = item.charge.amount - item.allocatedAmount;
+      item.remainingAmount = Math.max(0, item.charge.amount - item.allocatedAmount);
       if (item.remainingAmount <= 0) {
         item.status = 'paid';
       } else {
