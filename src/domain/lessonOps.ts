@@ -36,7 +36,12 @@ export function buildCompleteAndPayPayload(
   nowIso: string = new Date().toISOString()
 ): CompleteAndPayPayload {
   const lessonDate = lesson.start_at.slice(0, 10);
-  const existingCharge = existingCharges.find(c => c.lesson_id === lesson.id && c.amount > 0);
+  const existingCharge = existingCharges.find(
+    c => c.lesson_id === lesson.id &&
+         c.charge_type === 'lesson' &&
+         c.amount > 0 &&
+         !existingCharges.some(sc => sc.reverses_charge_id === c.id)
+  );
 
   // 1. Check if already fully paid (idempotency guarantee)
   if (existingCharge) {
@@ -153,6 +158,7 @@ export function buildCompleteAndPayPayload(
       ...existingIncome,
       charge_id: targetChargeId,
       lesson_id: lesson.id,
+      amount_due: lesson.price_snapshot,
       received_date: todayStr,
       amount_received: lesson.price_snapshot,
       method,
@@ -184,13 +190,14 @@ export interface LessonStatusChangePayload {
 
 /**
  * Pure domain function to handle lesson status transitions:
- * 1. Restoring a lesson to 'planned' (un-cancelling or un-completing):
- *    - Stornos any unpaid cancellation fee charges and zeroes out their income entry.
- *    - If reverting from 'completed', stornos any unpaid lesson charge and zeroes out its income entry.
- * 2. Changing to cancelled / no_show:
- *    - If previously 'completed', stornos any unpaid lesson charge.
- *    - If cancelled_student or no_show, assesses cancellation fee only if no active charge exists yet.
- * 3. Immutable financial history: never mutates or deletes existing financial records; uses storno entries with negative amounts.
+ * 1. Restoring to 'planned' or cancelling ('cancelled_student' / 'cancelled_tutor'):
+ *    - Stornos all active, positive, unpaid charges for this lesson ('lesson' and 'paid_cancellation')
+ *      using negative storno entries with original accrual_date, and zeroes out linked income entries.
+ *    - Cancelled lessons ('cancelled_student' / 'cancelled_tutor') NEVER create a fee or debt.
+ * 2. Changing to 'no_show' (explicitly 100% paid student absence):
+ *    - Stornos any unpaid regular 'lesson' charge first.
+ *    - Assesses 'paid_cancellation' fee only if no active cancellation charge exists yet.
+ * 3. Immutable financial history: never mutates or deletes existing financial records; uses storno entries.
  */
 export function buildLessonStatusChangePayload(
   lesson: Lesson,
@@ -205,7 +212,6 @@ export function buildLessonStatusChangePayload(
   }
 ): LessonStatusChangePayload {
   const nowIso = options?.nowIso || new Date().toISOString();
-  const todayStr = nowIso.slice(0, 10);
   const note = options?.note;
 
   const updatedLesson: Lesson = {
@@ -218,174 +224,98 @@ export function buildLessonStatusChangePayload(
 
   const stornoCharges: Charge[] = [];
   const updatedIncomeEntries: IncomeEntry[] = [];
+  const updatedIncomeIds = new Set<string>();
   let newCancellationCharge: Charge | null = null;
   let newCancellationIncomeEntry: IncomeEntry | null = null;
 
-  // 1. If transitioning to 'planned':
-  if (targetStatus === 'planned') {
-    // A. Revert/storno any unpaid cancellation fees for this lesson
-    const cancelCharges = existingCharges.filter(
+  const stornoUnpaidCharges = (chargeTypes: Array<Charge['charge_type']>, prefix: string) => {
+    const activeCharges = existingCharges.filter(
+      c => c.lesson_id === lesson.id &&
+           chargeTypes.includes(c.charge_type) &&
+           c.amount > 0 &&
+           !existingCharges.some(sc => sc.reverses_charge_id === c.id)
+    );
+
+    for (const ch of activeCharges) {
+      const allocated = existingAllocations
+        .filter(a => a.charge_id === ch.id)
+        .reduce((sum, a) => sum + a.amount, 0);
+      if (allocated > 0) continue;
+
+      stornoCharges.push({
+        id: generateUUID(),
+        student_id: ch.student_id,
+        lesson_id: lesson.id,
+        amount: -ch.amount,
+        accrual_date: ch.accrual_date,
+        charge_type: ch.charge_type,
+        reverses_charge_id: ch.id,
+        description: `${prefix}${ch.description || (ch.charge_type === 'paid_cancellation' ? 'Opłata za odwołanie' : 'Lekcja')}`,
+        version: 1,
+        created_at: nowIso,
+        updated_at: nowIso
+      });
+
+      const matchingIncomes = existingIncomeEntries.filter(
+        e => (e.charge_id === ch.id || (!e.charge_id && e.lesson_id === lesson.id)) &&
+             (e.amount_due > 0 || e.status !== 'paid')
+      );
+      for (const inc of matchingIncomes) {
+        if (updatedIncomeIds.has(inc.id)) continue;
+        updatedIncomeIds.add(inc.id);
+        updatedIncomeEntries.push({
+          ...inc,
+          amount_due: 0,
+          status: 'paid',
+          version: inc.version + 1,
+          updated_at: nowIso
+        });
+      }
+    }
+  };
+
+  // 1. Transitioning to 'planned' or regular cancellation ('cancelled_student' / 'cancelled_tutor'):
+  //    Always storno any unpaid 'lesson' and 'paid_cancellation' charges and NEVER create a fee.
+  if (targetStatus === 'planned' || targetStatus === 'cancelled_student' || targetStatus === 'cancelled_tutor') {
+    const prefix = targetStatus === 'planned' ? 'Storno: ' : 'Storno odwołanej lekcji: ';
+    stornoUnpaidCharges(['paid_cancellation', 'lesson'], prefix);
+  }
+
+  // 2. Transitioning to explicit 'no_show' (100% odpłatna nieobecność ucznia):
+  if (targetStatus === 'no_show') {
+    stornoUnpaidCharges(['lesson'], 'Storno odwołanej lekcji: ');
+
+    const hasActiveCancelCharge = existingCharges.some(
       c => c.lesson_id === lesson.id &&
            c.charge_type === 'paid_cancellation' &&
            c.amount > 0 &&
            !existingCharges.some(sc => sc.reverses_charge_id === c.id)
     );
-    for (const cc of cancelCharges) {
-      const allocated = existingAllocations
-        .filter(a => a.charge_id === cc.id)
-        .reduce((sum, a) => sum + a.amount, 0);
-      if (allocated === 0) {
-        // Create storno charge
-        const storno: Charge = {
+    if (!hasActiveCancelCharge) {
+      const assessment = assessCancellation(lesson, nowIso, DEFAULT_CANCEL_POLICY, true);
+      if (!assessment.isFree && assessment.feeGrosze > 0) {
+        newCancellationCharge = {
           id: generateUUID(),
-          student_id: cc.student_id,
+          student_id: lesson.student_id,
           lesson_id: lesson.id,
-          amount: -cc.amount,
-          accrual_date: todayStr,
+          amount: assessment.feeGrosze,
+          accrual_date: lesson.start_at.slice(0, 10),
           charge_type: 'paid_cancellation',
-          reverses_charge_id: cc.id,
-          description: `Storno: ${cc.description || 'Opłata za odwołanie'}`,
+          description: assessment.reason,
           version: 1,
           created_at: nowIso,
           updated_at: nowIso
         };
-        stornoCharges.push(storno);
 
-        // Cancel income entry
-        const inc = existingIncomeEntries.find(e => e.charge_id === cc.id);
-        if (inc) {
-          updatedIncomeEntries.push({
-            ...inc,
-            amount_due: 0,
-            status: 'paid',
-            version: inc.version + 1,
-            updated_at: nowIso
-          });
-        }
-      }
-    }
-
-    // B. If reverting from 'completed', storno any unpaid regular lesson charge
-    if (lesson.status === 'completed') {
-      const lessonCharges = existingCharges.filter(
-        c => c.lesson_id === lesson.id &&
-             c.charge_type === 'lesson' &&
-             c.amount > 0 &&
-             !existingCharges.some(sc => sc.reverses_charge_id === c.id)
-      );
-      for (const lc of lessonCharges) {
-        const allocated = existingAllocations
-          .filter(a => a.charge_id === lc.id)
-          .reduce((sum, a) => sum + a.amount, 0);
-        if (allocated === 0) {
-          const storno: Charge = {
-            id: generateUUID(),
-            student_id: lc.student_id,
-            lesson_id: lesson.id,
-            amount: -lc.amount,
-            accrual_date: todayStr,
-            charge_type: 'lesson',
-            reverses_charge_id: lc.id,
-            description: `Storno lekcji: ${lc.description || ''}`,
-            version: 1,
-            created_at: nowIso,
-            updated_at: nowIso
-          };
-          stornoCharges.push(storno);
-
-          const inc = existingIncomeEntries.find(e => e.charge_id === lc.id || e.lesson_id === lesson.id);
-          if (inc) {
-            updatedIncomeEntries.push({
-              ...inc,
-              amount_due: 0,
-              status: 'paid',
-              version: inc.version + 1,
-              updated_at: nowIso
-            });
-          }
-        }
-      }
-    }
-  }
-
-  // 2. If transitioning to cancelled / no_show:
-  if (targetStatus === 'cancelled_student' || targetStatus === 'cancelled_tutor' || targetStatus === 'no_show') {
-    // If previously completed, storno unpaid lesson charge
-    if (lesson.status === 'completed') {
-      const lessonCharges = existingCharges.filter(
-        c => c.lesson_id === lesson.id &&
-             c.charge_type === 'lesson' &&
-             c.amount > 0 &&
-             !existingCharges.some(sc => sc.reverses_charge_id === c.id)
-      );
-      for (const lc of lessonCharges) {
-        const allocated = existingAllocations
-          .filter(a => a.charge_id === lc.id)
-          .reduce((sum, a) => sum + a.amount, 0);
-        if (allocated === 0) {
-          const storno: Charge = {
-            id: generateUUID(),
-            student_id: lc.student_id,
-            lesson_id: lesson.id,
-            amount: -lc.amount,
-            accrual_date: todayStr,
-            charge_type: 'lesson',
-            reverses_charge_id: lc.id,
-            description: `Storno odwołanej lekcji: ${lc.description || ''}`,
-            version: 1,
-            created_at: nowIso,
-            updated_at: nowIso
-          };
-          stornoCharges.push(storno);
-
-          const inc = existingIncomeEntries.find(e => e.charge_id === lc.id || e.lesson_id === lesson.id);
-          if (inc) {
-            updatedIncomeEntries.push({
-              ...inc,
-              amount_due: 0,
-              status: 'paid',
-              version: inc.version + 1,
-              updated_at: nowIso
-            });
-          }
-        }
-      }
-    }
-
-    // Cancellation fee assessment
-    if (targetStatus === 'cancelled_student' || targetStatus === 'no_show') {
-      const hasActiveCancelCharge = existingCharges.some(
-        c => c.lesson_id === lesson.id &&
-             c.charge_type === 'paid_cancellation' &&
-             c.amount > 0 &&
-             !existingCharges.some(sc => sc.reverses_charge_id === c.id)
-      );
-      if (!hasActiveCancelCharge) {
-        const assessment = assessCancellation(lesson, nowIso, DEFAULT_CANCEL_POLICY, targetStatus === 'no_show');
-        if (!assessment.isFree && assessment.feeGrosze > 0) {
-          newCancellationCharge = {
-            id: generateUUID(),
-            student_id: lesson.student_id,
-            lesson_id: lesson.id,
-            amount: assessment.feeGrosze,
-            accrual_date: lesson.start_at.slice(0, 10),
-            charge_type: 'paid_cancellation',
-            description: assessment.reason,
-            version: 1,
-            created_at: nowIso,
-            updated_at: nowIso
-          };
-
-          const formattedNum = options?.nextIncomeNumber || '2026/999';
-          newCancellationIncomeEntry = deriveIncomeEntry({
-            charge: newCancellationCharge,
-            allocations: [],
-            payments: [],
-            existingEntry: null,
-            number: formattedNum,
-            nowIso
-          });
-        }
+        const formattedNum = options?.nextIncomeNumber || '2026/999';
+        newCancellationIncomeEntry = deriveIncomeEntry({
+          charge: newCancellationCharge,
+          allocations: [],
+          payments: [],
+          existingEntry: null,
+          number: formattedNum,
+          nowIso
+        });
       }
     }
   }

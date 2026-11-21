@@ -153,15 +153,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const refreshFromIDB = useCallback(async () => {
     const data = await IDBManager.loadInitialState();
 
-    // Automatyczna deduplikacja omyłkowych podwójnych naliczeń za tę samą lekcję (FIX na 320 zł -> 160 zł)
+    // Automatyczna deduplikacja omyłkowych podwójnych naliczeń za tę samą lekcję (z ochroną wpisów storno)
+    const reversedChargeIds = new Set(
+      data.charges.filter(c => c.reverses_charge_id).map(c => c.reverses_charge_id!)
+    );
     const seenLessonCharges = new Set<string>();
     const seenGenericCharges = new Set<string>();
     const duplicateChargeIds: string[] = [];
     const cleanCharges: Charge[] = [];
 
     for (const c of data.charges) {
-      const lessonKey = c.charge_type === 'lesson' && c.lesson_id ? c.lesson_id : null;
-      const genericKey = `${c.student_id}|${c.accrual_date}|${c.amount}|${c.description}`;
+      const isStorno = c.amount <= 0 || !!c.reverses_charge_id;
+      const isReversed = reversedChargeIds.has(c.id);
+      const lessonKey = !isStorno && !isReversed && c.charge_type === 'lesson' && c.lesson_id
+        ? c.lesson_id
+        : null;
+      const genericKey = isStorno
+        ? `storno|${c.reverses_charge_id || c.id}`
+        : isReversed
+          ? `reversed|${c.id}`
+          : `${c.student_id}|${c.accrual_date}|${c.amount}|${c.description}`;
 
       let isDuplicate = false;
       if (lessonKey && seenLessonCharges.has(lessonKey)) {
@@ -211,6 +222,70 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
 
+    // Samonaprawa: odwołane lekcje (cancelled_student / cancelled_tutor) nie mogą tworzyć zaległości do opłaty
+    const cleanIncomeEntries = [...data.income_entries];
+    const cancelledLessonIds = new Set(
+      data.lessons
+        .filter(l => l.status === 'cancelled_student' || l.status === 'cancelled_tutor')
+        .map(l => l.id)
+    );
+
+    if (cancelledLessonIds.size > 0) {
+      const activeReversedIds = new Set(
+        cleanCharges.filter(c => c.reverses_charge_id).map(c => c.reverses_charge_id!)
+      );
+      const healNowIso = new Date().toISOString();
+
+      for (const c of [...cleanCharges]) {
+        if (!c.lesson_id || !cancelledLessonIds.has(c.lesson_id)) continue;
+        if (c.amount <= 0 || activeReversedIds.has(c.id)) continue;
+
+        const hasAllocatedPayment = cleanAllocations.some(a => a.charge_id === c.id && a.amount > 0);
+        if (hasAllocatedPayment) continue;
+
+        const stornoId = `storno-${c.id}`;
+        if (!cleanCharges.some(sc => sc.id === stornoId)) {
+          const storno: Charge = {
+            id: stornoId,
+            student_id: c.student_id,
+            lesson_id: c.lesson_id,
+            amount: -c.amount,
+            accrual_date: c.accrual_date,
+            charge_type: c.charge_type,
+            reverses_charge_id: c.id,
+            description: `Storno odwołanej lekcji: ${c.description || ''}`,
+            version: 1,
+            created_at: healNowIso,
+            updated_at: healNowIso
+          };
+          await IDBManager.put('charges', storno);
+          await IDBManager.queueOperation('charges', 'insert', storno);
+          cleanCharges.push(storno);
+          activeReversedIds.add(c.id);
+        }
+
+        for (let idx = 0; idx < cleanIncomeEntries.length; idx++) {
+          const inc = cleanIncomeEntries[idx];
+          const matchesCharge = inc.charge_id === c.id || (!inc.charge_id && inc.lesson_id === c.lesson_id);
+          if (matchesCharge && (inc.amount_due > 0 || inc.status !== 'paid')) {
+            const updatedInc: IncomeEntry = {
+              ...inc,
+              amount_due: 0,
+              status: 'paid',
+              version: inc.version + 1,
+              updated_at: healNowIso
+            };
+            await IDBManager.put('income_entries', updatedInc);
+            await IDBManager.queueOperation('income_entries', 'update', updatedInc);
+            cleanIncomeEntries[idx] = updatedInc;
+          }
+        }
+      }
+    }
+
+    const db = await IDBManager.getDB();
+    const freshOfflineQueue = await IDBManager.getAll<OfflineOperation>(db, 'offline_queue');
+
     setStudents(data.students);
     setGuardians(data.guardians);
     setRateHistory(data.rate_history);
@@ -221,13 +296,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPayments(data.payments);
     setPaymentAllocations(cleanAllocations);
     setPackages(data.packages);
-    setIncomeEntries(data.income_entries);
+    setIncomeEntries(cleanIncomeEntries);
     setLegalParams(data.legal_params);
     setPeriods(data.periods);
     setReportSnapshots(data.report_snapshots);
     setAuditLogs(data.audit_logs);
     setSettings(data.settings);
-    setOfflineQueue(data.offline_queue.filter(op => !(op.table === 'charges' && duplicateChargeIds.includes(op.record?.id))));
+    setOfflineQueue(freshOfflineQueue);
     setRejectedOperations(data.rejected_operations || []);
 
     if (data.settings.pin_enabled && data.settings.pin_hash) {
@@ -547,10 +622,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await commitChange('lessons', 'update', updatedLesson);
     setLessons(prev => prev.map(l => l.id === lessonId ? updatedLesson : l));
 
-    // 2. Create Charge if not already existing
+    // 2. Create Charge if no active (non-storned) lesson charge exists
     const db = await IDBManager.getDB();
     const freshCharges = await IDBManager.getAll<Charge>(db, 'charges');
-    const existingCharge = freshCharges.find(c => c.lesson_id === lesson.id && c.amount > 0);
+    const existingCharge = freshCharges.find(
+      c => c.lesson_id === lesson.id &&
+           c.charge_type === 'lesson' &&
+           c.amount > 0 &&
+           !freshCharges.some(sc => sc.reverses_charge_id === c.id)
+    );
 
     let charge = existingCharge;
     if (!charge) {
@@ -593,6 +673,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
       await commitChange('income_entries', 'insert', newIncome);
       setIncomeEntries(prev => [...prev, newIncome]);
+    } else if (existingIncome.charge_id !== activeCharge.id || existingIncome.amount_due === 0) {
+      const year = Number(lessonDate.slice(0, 4));
+      const formattedNum = existingIncome.number || getNextIncomeNumber(year);
+      const freshAllocations = await IDBManager.getAll<PaymentAllocation>(db, 'payment_allocations');
+      const freshPayments = await IDBManager.getAll<Payment>(db, 'payments');
+      const restoredIncome = deriveIncomeEntry({
+        charge: activeCharge,
+        allocations: freshAllocations,
+        payments: freshPayments,
+        existingEntry: existingIncome,
+        number: formattedNum,
+        nowIso
+      });
+      await commitChange('income_entries', 'update', restoredIncome);
+      setIncomeEntries(prev => prev.map(e => e.id === restoredIncome.id ? restoredIncome : e));
     }
   }, [lessons, charges, incomeEntries, assertNotClosedPeriod, commitChange, getNextIncomeNumber]);
 
@@ -617,7 +712,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const db = await IDBManager.getDB();
     const freshCharges = await IDBManager.getAll<Charge>(db, 'charges');
     const freshAllocations = await IDBManager.getAll<PaymentAllocation>(db, 'payment_allocations');
-    const targetCharge = freshCharges.find(c => c.lesson_id === lesson.id && c.amount > 0);
+    const targetCharge = freshCharges.find(
+      c => c.lesson_id === lesson.id &&
+           c.charge_type === 'lesson' &&
+           c.amount > 0 &&
+           !freshCharges.some(sc => sc.reverses_charge_id === c.id)
+    );
 
     // Ochrona przed zdublowaną wpłatą: jeśli należność jest już w pełni opłacona, nic nie rób
     if (targetCharge) {
@@ -1129,9 +1229,47 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [settings, refreshFromIDB]);
 
   const deleteCharge = useCallback(async (chargeId: UUID) => {
-    await IDBManager.delete('charges', chargeId);
-    setCharges(prev => prev.filter(c => c.id !== chargeId));
-  }, []);
+    const target = charges.find(c => c.id === chargeId);
+    if (!target || target.amount <= 0) return;
+
+    const alreadyStorned = charges.some(sc => sc.reverses_charge_id === target.id);
+    if (alreadyStorned) return;
+
+    const nowIso = new Date().toISOString();
+    const stornoCharge: Charge = {
+      id: generateUUID(),
+      student_id: target.student_id,
+      lesson_id: target.lesson_id,
+      package_id: target.package_id,
+      amount: -target.amount,
+      accrual_date: target.accrual_date,
+      charge_type: target.charge_type,
+      reverses_charge_id: target.id,
+      description: `Storno: ${target.description || 'Należność'}`,
+      version: 1,
+      created_at: nowIso,
+      updated_at: nowIso
+    };
+    await commitChange('charges', 'insert', stornoCharge);
+    setCharges(prev => [...prev, stornoCharge]);
+
+    const matchingIncomes = incomeEntries.filter(
+      e => (e.charge_id === target.id || (!e.charge_id && target.lesson_id && e.lesson_id === target.lesson_id)) &&
+           e.amount_received === 0 &&
+           (e.amount_due > 0 || e.status !== 'paid')
+    );
+    for (const inc of matchingIncomes) {
+      const updatedInc: IncomeEntry = {
+        ...inc,
+        amount_due: 0,
+        status: 'paid',
+        version: inc.version + 1,
+        updated_at: nowIso
+      };
+      await commitChange('income_entries', 'update', updatedInc);
+      setIncomeEntries(prev => prev.map(e => e.id === updatedInc.id ? updatedInc : e));
+    }
+  }, [charges, incomeEntries, commitChange]);
 
   const testConnection = useCallback(async (url: string, token: string) => {
     return await testGasConnection(url, token);

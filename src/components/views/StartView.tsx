@@ -118,8 +118,8 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
 
   // Check payment status of each lesson
   const balanceMap = useMemo(() => {
-    return getChargesBalance(charges, paymentAllocations, payments);
-  }, [charges, paymentAllocations, payments]);
+    return getChargesBalance(charges, paymentAllocations, payments, lessons);
+  }, [charges, paymentAllocations, payments, lessons]);
 
   // Past unconfirmed lessons (start_at < todayStr and not yet completed/cancelled) (B1)
   const unconfirmedLessons = useMemo(() => {
@@ -420,8 +420,12 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
             const isCancelled = lesson.status.startsWith('cancelled');
             const timeStr = lesson.start_at.slice(11, 16);
 
-            // Check charge and payment status
-            const charge = charges.find(c => c.lesson_id === lesson.id && c.amount > 0);
+            // Check charge and payment status (ignoring storned charges)
+            const charge = charges.find(
+              c => c.lesson_id === lesson.id &&
+                   c.amount > 0 &&
+                   !charges.some(sc => sc.reverses_charge_id === c.id)
+            );
             const b = charge ? balanceMap.get(charge.id) : null;
             const isPaid = b?.status === 'paid';
 
@@ -444,12 +448,12 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                     marginBottom: 0,
                     opacity: isCancelled ? 0.6 : 1,
                     borderLeft: `4px solid ${
-                      isPaid
+                      isCancelled
+                        ? 'var(--ios-red)'
+                        : isPaid
                         ? 'var(--ios-green)'
                         : isCompleted
                         ? 'var(--ios-amber)'
-                        : isCancelled
-                        ? 'var(--ios-red)'
                         : 'var(--ios-blue)'
                     }`
                   }}
@@ -458,12 +462,12 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
                       <span style={{ fontSize: 16, fontWeight: 700 }}>{timeStr}</span>
                       <span style={{ fontSize: 12, color: 'var(--ios-text-secondary)' }}>({lesson.duration_min} min)</span>
-                      {isPaid ? (
+                      {isCancelled ? (
+                        <span className="ios-badge ios-badge-red">Odwołana</span>
+                      ) : isPaid ? (
                         <span className="ios-badge ios-badge-green">Opłacona</span>
                       ) : isCompleted ? (
                         <span className="ios-badge ios-badge-amber">Do zapłaty</span>
-                      ) : isCancelled ? (
-                        <span className="ios-badge ios-badge-red">Odwołana</span>
                       ) : (
                         <span className="ios-badge ios-badge-blue">Plan</span>
                       )}
@@ -694,7 +698,11 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
               )}
 
               {selectedLesson.status === 'completed' && (() => {
-                const charge = charges.find(c => c.lesson_id === selectedLesson.id && c.amount > 0);
+                const charge = charges.find(
+                  c => c.lesson_id === selectedLesson.id &&
+                       c.amount > 0 &&
+                       !charges.some(sc => sc.reverses_charge_id === c.id)
+                );
                 const isPaid = charge ? balanceMap.get(charge.id)?.status === 'paid' : false;
                 return (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -726,6 +734,20 @@ export const StartView: React.FC<StartViewProps> = ({ onOpenSettings, onOpenCale
                   </div>
                 );
               })()}
+
+              {selectedLesson.status !== 'cancelled_student' &&
+                selectedLesson.status !== 'cancelled_tutor' && (
+                <button
+                  className="ios-btn ios-btn-secondary"
+                  style={{ color: 'var(--ios-red)', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+                  onClick={async () => {
+                    await updateLessonStatus(selectedLesson.id, 'cancelled_student');
+                    setShowActionModal(false);
+                  }}
+                >
+                  <IconX size={18} /> Odwołaj lekcję (bez opłaty)
+                </button>
+              )}
 
               <button
                 className="ios-btn ios-btn-danger"

@@ -1,4 +1,4 @@
-import { Charge, Payment, PaymentAllocation, UUID } from './types';
+import { Charge, Lesson, Payment, PaymentAllocation, UUID } from './types';
 import { Money } from './money';
 
 export interface ChargeBalance {
@@ -28,9 +28,11 @@ export interface StudentFinancialSummary {
 export function getChargesBalance(
   charges: Charge[],
   allocations: PaymentAllocation[],
-  payments?: Payment[]
+  payments?: Payment[],
+  lessons?: Lesson[]
 ): Map<UUID, ChargeBalance> {
   const map = new Map<UUID, ChargeBalance>();
+  const stornedChargeIds = new Set<UUID>();
 
   for (const c of charges) {
     const isStorno = c.amount <= 0 || !!c.reverses_charge_id;
@@ -45,6 +47,7 @@ export function getChargesBalance(
   // Handle storno reversals: both the storno and the reversed charge have remainingAmount = 0
   for (const c of charges) {
     if (c.reverses_charge_id) {
+      stornedChargeIds.add(c.reverses_charge_id);
       const reversed = map.get(c.reverses_charge_id);
       if (reversed) {
         reversed.remainingAmount = 0;
@@ -61,13 +64,28 @@ export function getChargesBalance(
       continue;
     }
     const item = map.get(alloc.charge_id);
-    if (item && item.charge.amount > 0 && !item.charge.reverses_charge_id) {
+    if (item && item.charge.amount > 0 && !item.charge.reverses_charge_id && !stornedChargeIds.has(item.charge.id)) {
       item.allocatedAmount += alloc.amount;
       item.remainingAmount = Math.max(0, item.charge.amount - item.allocatedAmount);
       if (item.remainingAmount <= 0) {
         item.status = 'paid';
       } else {
         item.status = 'partial';
+      }
+    }
+  }
+
+  // Ensure cancelled or planned lessons with 0 allocated payments never produce unpaid debt
+  if (lessons && lessons.length > 0) {
+    const inactiveLessonIds = new Set(
+      lessons
+        .filter(l => l.status === 'cancelled_student' || l.status === 'cancelled_tutor' || l.status === 'planned')
+        .map(l => l.id)
+    );
+    for (const item of map.values()) {
+      if (item.charge.lesson_id && inactiveLessonIds.has(item.charge.lesson_id) && item.allocatedAmount === 0) {
+        item.remainingAmount = 0;
+        item.status = 'paid';
       }
     }
   }

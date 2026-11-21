@@ -6,7 +6,7 @@ import { PaymentMethod, Student } from '../../domain/types';
 import { IconDownload, IconX, IconCheck } from '../common/Icons';
 
 export const FinanceView: React.FC = () => {
-  const { charges, payments, paymentAllocations, incomeEntries, students, deleteCharge, recordPayment } = useApp();
+  const { charges, payments, paymentAllocations, incomeEntries, students, lessons, deleteCharge, recordPayment } = useApp();
   const [activeSubTab, setActiveSubTab] = useState<'charges' | 'payments' | 'register'>('charges');
   const [chargesFilter, setChargesFilter] = useState<'all' | 'open'>('open');
   const [periodFilter, setPeriodFilter] = useState('2026-11');
@@ -16,14 +16,19 @@ export const FinanceView: React.FC = () => {
   const [payModalAmountStr, setPayModalAmountStr] = useState('');
   const [payModalMethod, setPayModalMethod] = useState<PaymentMethod>('blik');
 
+  // Positive charges (exclude negative technical storno rows from display list)
+  const visibleCharges = useMemo(() => {
+    return charges.filter(c => c.amount > 0);
+  }, [charges]);
+
   // Charges balance & age of debt
   const openCharges = useMemo(() => {
-    const balanceMap = getChargesBalance(charges, paymentAllocations, payments);
+    const balanceMap = getChargesBalance(charges, paymentAllocations, payments, lessons);
     const list = Array.from(balanceMap.values()).filter(b => b.remainingAmount > 0);
 
     // Sort by oldest accrual_date first (age of debt)
     return list.sort((a, b) => a.charge.accrual_date.localeCompare(b.charge.accrual_date));
-  }, [charges, paymentAllocations, payments]);
+  }, [charges, paymentAllocations, payments, lessons]);
 
   // Group open charges by student (B2)
   const openDebtsByStudent = useMemo(() => {
@@ -56,10 +61,10 @@ export const FinanceView: React.FC = () => {
     return proposeFifoAllocation(amountGrosze, studentCharges, studentAllocs);
   }, [payModalStudent, payModalAmountStr, charges, paymentAllocations]);
 
-  // Filtered income entries
+  // Filtered income entries (exclude zeroed-out storned entries)
   const filteredIncome = useMemo(() => {
     return incomeEntries
-      .filter(e => e.accrual_date.startsWith(periodFilter))
+      .filter(e => e.accrual_date.startsWith(periodFilter) && (e.amount_due > 0 || e.amount_received > 0))
       .sort((a, b) => b.number.localeCompare(a.number));
   }, [incomeEntries, periodFilter]);
 
@@ -156,7 +161,7 @@ export const FinanceView: React.FC = () => {
               className={`ios-btn ${chargesFilter === 'all' ? 'ios-btn-primary' : 'ios-btn-secondary'}`}
               style={{ padding: '6px 14px', fontSize: 13, minHeight: 32 }}
             >
-              Wszystkie ({charges.length})
+              Wszystkie ({visibleCharges.length})
             </button>
             <button
               onClick={() => setChargesFilter('open')}
@@ -286,25 +291,30 @@ export const FinanceView: React.FC = () => {
           ) : (
             /* ALL CHARGES LIST */
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {charges
+              {visibleCharges
                 .slice()
                 .sort((a, b) => b.accrual_date.localeCompare(a.accrual_date) || b.created_at.localeCompare(a.created_at))
                 .map(c => {
                   const student = students.find(s => s.id === c.student_id);
+                  const isStorned = charges.some(sc => sc.reverses_charge_id === c.id);
                   const allocated = paymentAllocations
-                    .filter(a => a.charge_id === c.id)
+                    .filter(a => a.charge_id === c.id && payments.some(p => p.id === a.payment_id))
                     .reduce((sum, a) => sum + a.amount, 0);
-                  const isFullyPaid = allocated >= c.amount;
+                  const isFullyPaid = !isStorned && allocated >= c.amount;
 
                   return (
-                    <div key={c.id} className="ios-card" style={{ marginBottom: 0, padding: 12 }}>
+                    <div key={c.id} className="ios-card" style={{ marginBottom: 0, padding: 12, opacity: isStorned ? 0.65 : 1 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                             <span style={{ fontWeight: 700, fontSize: 15 }}>
                               {student ? `${student.first_name} ${student.last_name}` : 'Uczeń'}
                             </span>
-                            {isFullyPaid ? (
+                            {isStorned ? (
+                              <span className="ios-badge" style={{ fontSize: 10, backgroundColor: 'rgba(142,142,147,0.18)', color: 'var(--ios-text-secondary)' }}>
+                                Anulowane (Storno)
+                              </span>
+                            ) : isFullyPaid ? (
                               <span className="ios-badge ios-badge-green" style={{ fontSize: 10 }}>Opłacona</span>
                             ) : (
                               <span className="ios-badge ios-badge-amber" style={{ fontSize: 10 }}>Do zapłaty</span>
@@ -317,36 +327,38 @@ export const FinanceView: React.FC = () => {
 
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                           <div style={{ textAlign: 'right' }}>
-                            <div style={{ fontSize: 16, fontWeight: 700 }}>
+                            <div style={{ fontSize: 16, fontWeight: 700, textDecoration: isStorned ? 'line-through' : 'none' }}>
                               {Money.format(c.amount)}
                             </div>
                             <div style={{ fontSize: 11, color: 'var(--ios-text-secondary)' }}>
-                              {isFullyPaid ? 'Rozliczona' : `Pozostało: ${Money.format(c.amount - allocated)}`}
+                              {isStorned ? 'Anulowano' : isFullyPaid ? 'Rozliczona' : `Pozostało: ${Money.format(c.amount - allocated)}`}
                             </div>
                           </div>
 
-                          <button
-                            onClick={() => {
-                              if (confirm(`Czy na pewno chcesz usunąć to naliczenie (${Money.format(c.amount)})?`)) {
-                                deleteCharge(c.id);
-                              }
-                            }}
-                            title="Usuń naliczenie"
-                            style={{
-                              border: 'none',
-                              background: 'rgba(255,59,48,0.1)',
-                              color: 'var(--ios-red)',
-                              borderRadius: 8,
-                              width: 32,
-                              height: 32,
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              cursor: 'pointer'
-                            }}
-                          >
-                            <IconX size={16} />
-                          </button>
+                          {!isStorned && (
+                            <button
+                              onClick={() => {
+                                if (confirm(`Czy na pewno chcesz anulować (wystornować) to naliczenie (${Money.format(c.amount)})?`)) {
+                                  deleteCharge(c.id);
+                                }
+                              }}
+                              title="Anuluj (stornuj) naliczenie"
+                              style={{
+                                border: 'none',
+                                background: 'rgba(255,59,48,0.1)',
+                                color: 'var(--ios-red)',
+                                borderRadius: 8,
+                                width: 32,
+                                height: 32,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                cursor: 'pointer'
+                              }}
+                            >
+                              <IconX size={16} />
+                            </button>
+                          )}
                         </div>
                       </div>
                     </div>

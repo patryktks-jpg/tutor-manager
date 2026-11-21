@@ -33,6 +33,24 @@ export async function testGasConnection(url: string, token: string): Promise<{ s
   }
 }
 
+function deduplicateRowsById(rows: any[]): any[] {
+  const dedupedMap = new Map<string, any>();
+  for (const row of rows) {
+    if (!row || !row.id) continue;
+    const existing = dedupedMap.get(row.id);
+    if (!existing) {
+      dedupedMap.set(row.id, row);
+    } else {
+      const curVer = Number(existing.version) || 0;
+      const newVer = Number(row.version) || 0;
+      if (newVer > curVer || (newVer === curVer && (row.updated_at || '') >= (existing.updated_at || ''))) {
+        dedupedMap.set(row.id, row);
+      }
+    }
+  }
+  return Array.from(dedupedMap.values());
+}
+
 /**
  * Sanitizes records before sending to Google Sheets so sensitive security credentials
  * (pin_hash, gas_secret_token) are NEVER leaked into the spreadsheet! (PUNKT 5)
@@ -161,22 +179,9 @@ export async function syncWithGas(
         const rows = pullJson.data[table];
         if (Array.isArray(rows)) {
           // Deduplikacja rekordów z arkusza po ID – wybieramy najwyższą wersję (ochrona przed zduplikowanymi wierszami w arkuszu)
-          const dedupedMap = new Map<string, any>();
-          for (const row of rows) {
-            if (!row || !row.id) continue;
-            const existing = dedupedMap.get(row.id);
-            if (!existing) {
-              dedupedMap.set(row.id, row);
-            } else {
-              const curVer = Number(existing.version) || 0;
-              const newVer = Number(row.version) || 0;
-              if (newVer > curVer || (newVer === curVer && (row.updated_at || '') >= (existing.updated_at || ''))) {
-                dedupedMap.set(row.id, row);
-              }
-            }
-          }
+          const dedupedRows = deduplicateRowsById(rows);
 
-          for (const row of dedupedMap.values()) {
+          for (const row of dedupedRows) {
             // Ochrona lokalnych zmian w IndexedDB: nie nadpisuj nowszego stanu lokalnego starszą wersją z arkusza
             const localRecord = await IDBManager.get<any>(db, table, row.id);
             if (localRecord && Number(localRecord.version || 0) > Number(row.version || 0)) {
@@ -439,17 +444,14 @@ export async function pullCleanFromGas(
           clearTx.onerror = () => reject(clearTx.error);
         });
 
-        // Populate with rows from Google Sheets
+        // Populate with deduplicated highest-version rows from Google Sheets
         const rows = pullJson.data[table];
         if (Array.isArray(rows) && rows.length > 0) {
+          const dedupedRows = deduplicateRowsById(rows);
           const writeTx = db.transaction(table, 'readwrite');
           const store = writeTx.objectStore(table);
-          const seenIds = new Set<string>();
-          for (const row of rows) {
-            if (row.id && !seenIds.has(row.id)) {
-              seenIds.add(row.id);
-              store.put(row);
-            }
+          for (const row of dedupedRows) {
+            store.put(row);
           }
           await new Promise((resolve, reject) => {
             writeTx.oncomplete = () => resolve(true);

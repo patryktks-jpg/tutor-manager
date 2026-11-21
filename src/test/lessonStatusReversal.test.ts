@@ -287,4 +287,191 @@ describe('Lesson Status Transitions & Financial Invariants', () => {
     expect(balanceMap.get('ch-real')?.remainingAmount).toBe(0);
     expect(balanceMap.get('ch-real')?.status).toBe('paid');
   });
+
+  it('cancelling a lesson (cancelled_student or cancelled_tutor) NEVER creates a fee even < 24h or after start time, and stornos unpaid charges preserving accrual_date', () => {
+    const unpaidCancelFee: Charge = {
+      id: 'ch-old-cancel',
+      student_id: 'student-1',
+      lesson_id: 'lesson-1',
+      amount: 7000,
+      accrual_date: '2026-11-20',
+      charge_type: 'paid_cancellation',
+      description: 'Stara opłata',
+      version: 1,
+      created_at: '2026-11-20T21:00:00Z',
+      updated_at: '2026-11-20T21:00:00Z'
+    };
+
+    const unpaidIncome: IncomeEntry = {
+      id: 'inc-old-cancel',
+      charge_id: 'ch-old-cancel',
+      number: '2026/018',
+      service_date: '2026-11-20',
+      accrual_date: '2026-11-20',
+      student_id: 'student-1',
+      lesson_id: 'lesson-1',
+      service_type: 'Opłata za późne odwołanie lekcji',
+      amount_due: 7000,
+      amount_received: 0,
+      method: 'blik',
+      status: 'unpaid',
+      version: 1,
+      created_at: '2026-11-20T21:00:00Z',
+      updated_at: '2026-11-20T21:00:00Z'
+    };
+
+    // Planned lesson from 2026-11-20T16:00:00 cancelled the next day (after start time!)
+    const byStudent = buildLessonStatusChangePayload(
+      sampleLesson,
+      'cancelled_student',
+      [],
+      [],
+      [],
+      { nowIso: '2026-11-21T10:00:00Z', nextIncomeNumber: '2026/020' }
+    );
+    expect(byStudent.updatedLesson.status).toBe('cancelled_student');
+    expect(byStudent.newCancellationCharge).toBeNull();
+    expect(byStudent.newCancellationIncomeEntry).toBeNull();
+
+    const byTutor = buildLessonStatusChangePayload(
+      sampleLesson,
+      'cancelled_tutor',
+      [unpaidCancelFee],
+      [],
+      [unpaidIncome],
+      { nowIso: '2026-11-21T10:00:00Z', nextIncomeNumber: '2026/020' }
+    );
+    expect(byTutor.updatedLesson.status).toBe('cancelled_tutor');
+    expect(byTutor.newCancellationCharge).toBeNull();
+    expect(byTutor.newCancellationIncomeEntry).toBeNull();
+    expect(byTutor.stornoCharges).toHaveLength(1);
+    expect(byTutor.stornoCharges[0].amount).toBe(-7000);
+    // accrual_date must match original charge date so quarterly sums net to 0
+    expect(byTutor.stornoCharges[0].accrual_date).toBe('2026-11-20');
+    expect(byTutor.stornoCharges[0].reverses_charge_id).toBe('ch-old-cancel');
+    expect(byTutor.updatedIncomeEntries[0].amount_due).toBe(0);
+    expect(byTutor.updatedIncomeEntries[0].status).toBe('paid');
+  });
+
+  it('explicit no_show creates a paid_cancellation charge', () => {
+    const result = buildLessonStatusChangePayload(
+      sampleLesson,
+      'no_show',
+      [],
+      [],
+      [],
+      { note: 'Nieobecność ucznia', nowIso: '2026-11-20T16:30:00Z', nextIncomeNumber: '2026/021' }
+    );
+
+    expect(result.updatedLesson.status).toBe('no_show');
+    expect(result.newCancellationCharge).not.toBeNull();
+    expect(result.newCancellationCharge!.charge_type).toBe('paid_cancellation');
+    expect(result.newCancellationCharge!.amount).toBe(7000);
+    expect(result.newCancellationIncomeEntry).not.toBeNull();
+    expect(result.newCancellationIncomeEntry!.amount_due).toBe(7000);
+  });
+
+  it('getChargesBalance with lessons ignores unpaid debt for cancelled or planned lessons', () => {
+    const cancelledLesson: Lesson = { ...sampleLesson, id: 'l-canc', status: 'cancelled_student' };
+    const noShowLesson: Lesson = { ...sampleLesson, id: 'l-noshow', status: 'no_show' };
+
+    const orphanCancelCharge: Charge = {
+      id: 'ch-canc-unpaid',
+      student_id: 'student-1',
+      lesson_id: 'l-canc',
+      amount: 7000,
+      accrual_date: '2026-11-20',
+      charge_type: 'paid_cancellation',
+      version: 1,
+      created_at: '',
+      updated_at: ''
+    };
+
+    const noShowCharge: Charge = {
+      id: 'ch-noshow-unpaid',
+      student_id: 'student-1',
+      lesson_id: 'l-noshow',
+      amount: 7000,
+      accrual_date: '2026-11-20',
+      charge_type: 'paid_cancellation',
+      version: 1,
+      created_at: '',
+      updated_at: ''
+    };
+
+    const balanceMap = getChargesBalance(
+      [orphanCancelCharge, noShowCharge],
+      [],
+      [],
+      [cancelledLesson, noShowLesson]
+    );
+
+    expect(balanceMap.get('ch-canc-unpaid')?.remainingAmount).toBe(0);
+    expect(balanceMap.get('ch-canc-unpaid')?.status).toBe('paid');
+    expect(balanceMap.get('ch-noshow-unpaid')?.remainingAmount).toBe(7000);
+    expect(balanceMap.get('ch-noshow-unpaid')?.status).toBe('unpaid');
+  });
+
+  it('completed -> cancelled_student -> completed cycle stornos old charge and allows fresh charge creation', () => {
+    const initialPayPayload = buildCompleteAndPayPayload(
+      sampleLesson,
+      [],
+      [],
+      [],
+      '2026-11-20',
+      '2026/001',
+      'blik',
+      '2026-11-20T17:00:00Z'
+    );
+
+    // Simulate unpaid completion charge instead of paid
+    const unpaidLessonCharge: Charge = {
+      ...initialPayPayload.newCharge!,
+      id: 'ch-unpaid-1'
+    };
+    const unpaidIncome: IncomeEntry = {
+      ...initialPayPayload.newIncomeEntry!,
+      id: 'inc-1',
+      charge_id: 'ch-unpaid-1',
+      amount_received: 0,
+      status: 'unpaid',
+      received_date: undefined
+    };
+
+    // Cancel completed lesson -> stornos unpaid charge and zeroes income entry
+    const cancelPayload = buildLessonStatusChangePayload(
+      { ...sampleLesson, status: 'completed', version: 2 },
+      'cancelled_student',
+      [unpaidLessonCharge],
+      [],
+      [unpaidIncome],
+      { nowIso: '2026-11-20T18:00:00Z' }
+    );
+    expect(cancelPayload.stornoCharges).toHaveLength(1);
+    expect(cancelPayload.stornoCharges[0].reverses_charge_id).toBe('ch-unpaid-1');
+    expect(cancelPayload.updatedIncomeEntries[0].amount_due).toBe(0);
+
+    // Re-complete & pay after cancellation -> must create NEW active charge (ignoring storned one) and restore amount_due
+    const allChargesAfterCancel = [unpaidLessonCharge, ...cancelPayload.stornoCharges];
+    const recompletePayload = buildCompleteAndPayPayload(
+      cancelPayload.updatedLesson,
+      allChargesAfterCancel,
+      [],
+      cancelPayload.updatedIncomeEntries,
+      '2026-11-20',
+      '2026/002',
+      'gotowka',
+      '2026-11-20T19:00:00Z'
+    );
+
+    expect(recompletePayload.isAlreadyPaid).toBe(false);
+    expect(recompletePayload.newCharge).not.toBeNull();
+    expect(recompletePayload.newCharge!.id).not.toBe('ch-unpaid-1');
+    expect(recompletePayload.targetChargeId).toBe(recompletePayload.newCharge!.id);
+    expect(recompletePayload.newPayment).not.toBeNull();
+    expect(recompletePayload.newAllocation!.charge_id).toBe(recompletePayload.newCharge!.id);
+    expect(recompletePayload.updatedIncomeEntry!.amount_due).toBe(7000);
+    expect(recompletePayload.updatedIncomeEntry!.amount_received).toBe(7000);
+    expect(recompletePayload.updatedIncomeEntry!.status).toBe('paid');
+  });
 });
